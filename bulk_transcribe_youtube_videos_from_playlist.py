@@ -16,6 +16,13 @@ from pydub import AudioSegment
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
 
+from youtube_research_io import (
+    ManifestStore,
+    TranscriptPackageWriter,
+    TranscriptQuality,
+    VideoMetadata,
+)
+
 # Constants for pricing
 WHISPER_COST_PER_MINUTE = 0.006
 
@@ -57,8 +64,12 @@ if cuda_toolkit_path:
 max_workers_transcribe = psutil.cpu_count(logical=False)  # Number of physical cores
 
 os.makedirs('downloaded_audio', exist_ok=True)
-os.makedirs('generated_transcript_combined_texts', exist_ok=True)
-os.makedirs('generated_transcript_metadata_tables', exist_ok=True)
+
+raw_transcripts_root = 'Raw Transcripts'
+manifest_path = os.path.join('manifests', 'videos.jsonl')
+
+os.makedirs(raw_transcripts_root, exist_ok=True)
+os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
 
 if use_spacy_for_sentence_splitting:
     import spacy
@@ -70,13 +81,13 @@ if use_spacy_for_sentence_splitting:
             print(f"Downloading spaCy model {model_name}...")
             spacy.cli.download(model_name)
             return spacy.load(model_name)
-    nlp = download_spacy_model()  
+    nlp = download_spacy_model()
     def sophisticated_sentence_splitter(text):
         text = remove_pagination_breaks(text)
         doc = nlp(text)
         sentences = [sent.text.strip() for sent in doc.sents]
-        return sentences        
-else:    
+        return sentences
+else:
     def sophisticated_sentence_splitter(text):
         text = remove_pagination_breaks(text)
         pattern = r'\.(?!\s*(com|net|org|io)\s)(?![0-9])'
@@ -145,8 +156,8 @@ def remove_unwanted_segments_from_json(json_file_path, unwanted_text="Subtitles 
         print(f"Removed {original_segment_count - filtered_segment_count} unwanted segments from {json_file_path}.")
     else:
         print(f"No unwanted segments found in {json_file_path}.")
-        
-async def compute_transcript_with_whisper_from_audio_func(audio_file_path, audio_file_name, audio_file_size_mb):
+
+async def compute_transcript_with_whisper_from_audio_func(audio_file_path, audio_file_name, audio_file_size_mb, video_metadata):
     cuda_toolkit_path = get_cuda_toolkit_path()
     if cuda_toolkit_path:
         add_to_system_path(cuda_toolkit_path)
@@ -209,15 +220,32 @@ async def compute_transcript_with_whisper_from_audio_func(audio_file_path, audio
                 combined_transcript_text_list_of_metadata_dicts.append(metadata)
     if not combined_transcript_text_list_of_metadata_dicts:
         print(f"No segments were returned for file {audio_file_name}.")
-        return [], {}, "", [], datetime.datetime.now(datetime.UTC), datetime.datetime.now(datetime.UTC), 0, ""
-    with open(f'generated_transcript_combined_texts/{audio_file_name}.txt', 'w') as file:
-        file.write(combined_transcript_text)
-    df = pd.DataFrame(combined_transcript_text_list_of_metadata_dicts)
-    df.to_csv(f'generated_transcript_metadata_tables/{audio_file_name}.csv', index=False)
-    json_file_path = f'generated_transcript_metadata_tables/{audio_file_name}.json'
-    df.to_json(json_file_path, orient='records', indent=4)
-    remove_unwanted_segments_from_json(json_file_path)   
-    return combined_transcript_text, combined_transcript_text_list_of_metadata_dicts, list_of_transcript_sentences
+        raise RuntimeError(f"No transcript segments were returned for {video_metadata.video_id}")
+
+    avg_logprobs = [segment["avg_logprob"] for segment in combined_transcript_text_list_of_metadata_dicts]
+    quality = TranscriptQuality(
+        quality_status="usable",
+        selected_format="txt",
+        metrics={
+            "segment_count": len(combined_transcript_text_list_of_metadata_dicts),
+            "word_count": len(combined_transcript_text.split()),
+            "average_logprob": sum(avg_logprobs) / len(avg_logprobs),
+        },
+    )
+    package_result = TranscriptPackageWriter(raw_transcripts_root).write(
+        metadata=video_metadata,
+        transcript_text=combined_transcript_text,
+        segments=combined_transcript_text_list_of_metadata_dicts,
+        quality=quality,
+    )
+
+    return (
+        combined_transcript_text,
+        combined_transcript_text_list_of_metadata_dicts,
+        list_of_transcript_sentences,
+        package_result,
+        quality,
+    )
 
 async def process_video_or_playlist(url, max_simultaneous_downloads, max_workers_transcribe):
     if convert_single_video:
@@ -226,17 +254,66 @@ async def process_video_or_playlist(url, max_simultaneous_downloads, max_workers
     else:
         playlist = Playlist(url)
         videos = playlist.videos
+
     download_semaphore = asyncio.Semaphore(max_simultaneous_downloads)
+    manifest = ManifestStore(manifest_path)
+
     async def download_and_transcribe(video):
+        video_metadata = VideoMetadata(
+            video_id=video.video_id,
+            title=video.title,
+            source_url=video.watch_url,
+            channel=getattr(video, "author", None),
+            duration_seconds=getattr(video, "length", None),
+            transcription_backend=(
+                "openai-whisper-1"
+                if use_openai_api_for_transcription
+                else "faster-whisper-large-v3"
+            ),
+        )
+        manifest.queue(video_metadata)
         try:
             async with download_semaphore:
+                manifest.transition(
+                    video_id=video_metadata.video_id,
+                    new_status="transcribing",
+                    title=video_metadata.title,
+                    url=video_metadata.source_url,
+                )
                 audio_path, audio_filename = await download_audio(video)
-                if audio_path and audio_filename:
-                    audio_file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
-                    await compute_transcript_with_whisper_from_audio_func(audio_path, audio_filename, audio_file_size_mb)
+                if not audio_path or not audio_filename:
+                    raise RuntimeError(f"Audio download failed for {video_metadata.video_id}")
+
+                audio_file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+                _, _, _, package_result, quality = await compute_transcript_with_whisper_from_audio_func(
+                    audio_path,
+                    audio_filename,
+                    audio_file_size_mb,
+                    video_metadata,
+                )
+                manifest.transition(
+                    video_id=video_metadata.video_id,
+                    new_status="analysis_ready",
+                    updates={
+                        "transcript_directory": str(package_result.directory),
+                        "transcript_formats": ["txt", "csv", "json"],
+                        "selected_format": quality.selected_format,
+                        "quality_status": quality.quality_status,
+                        "package_sha256": package_result.package_sha256,
+                        "ready_marker": str(package_result.directory / "_READY"),
+                    },
+                )
         except Exception as e:
+            current = manifest.get(video_metadata.video_id)
+            if current and current.get("status") in {"queued", "transcribing"}:
+                manifest.transition(
+                    video_id=video_metadata.video_id,
+                    new_status="transcription_failed",
+                    error=f"{type(e).__name__}: {e}",
+                )
             traceback.print_exc()
             print(f"Error processing video {video.title}: {e}")
+
     tasks = [download_and_transcribe(video) for video in videos]
     await asyncio.gather(*tasks)
 
