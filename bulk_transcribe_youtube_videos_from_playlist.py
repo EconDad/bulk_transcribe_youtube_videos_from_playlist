@@ -254,10 +254,10 @@ async def compute_transcript_with_whisper_from_audio_func(audio_file_path, audio
 
 async def process_video_or_playlist(url, max_simultaneous_downloads, max_workers_transcribe):
     if convert_single_video:
-        yt = YouTube(url)
+        yt = YouTube(url, client="WEB")
         videos = [yt]
     else:
-        playlist = Playlist(url)
+        playlist = Playlist(url, client="WEB")
         videos = playlist.videos
 
     download_semaphore = asyncio.Semaphore(max_simultaneous_downloads)
