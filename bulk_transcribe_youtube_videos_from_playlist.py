@@ -114,23 +114,87 @@ async def download_audio(video):
     filename = clean_filename(video.title)
     base_filename = filename
     counter = 1
-    audio_dir = 'downloaded_audio'
-    audio_file_path = os.path.join(audio_dir, f"{filename}.mp4")
-    while os.path.exists(audio_file_path):
+    audio_dir = "downloaded_audio"
+
+    os.makedirs(audio_dir, exist_ok=True)
+
+    while glob.glob(os.path.join(audio_dir, f"{filename}.*")):
         filename = f"{base_filename}_{counter}"
-        audio_file_path = os.path.join(audio_dir, f"{filename}.mp4")
         counter += 1
-    if not os.path.exists(audio_file_path):
+
+    pytubefix_output = os.path.join(audio_dir, f"{filename}.mp4")
+
+    try:
         stream = video.streams.filter(only_audio=True).first()
         if stream is None:
             raise ValueError(f"No audio stream found for video: {video.title}")
-        try:
-            os.makedirs(audio_dir, exist_ok=True)
-            audio_file_path = stream.download(output_path=audio_dir, filename=f"{filename}.mp4")
-        except Exception as e:
-            print(f"Error downloading video {video.title}: {e}")
-            return None, None
-    return audio_file_path, filename
+
+        audio_file_path = await asyncio.to_thread(
+            stream.download,
+            output_path=audio_dir,
+            filename=f"{filename}.mp4",
+        )
+        return audio_file_path, filename
+
+    except Exception as pytubefix_error:
+        print(
+            f"PytubeFix download failed for {video.title}: "
+            f"{type(pytubefix_error).__name__}: {pytubefix_error}"
+        )
+        print("Falling back to yt-dlp with Deno/EJS...")
+
+        if os.path.exists(pytubefix_output):
+            os.remove(pytubefix_output)
+
+        deno_path = os.path.expanduser("~/.deno/bin/deno")
+        if not os.path.isfile(deno_path):
+            raise RuntimeError(
+                "yt-dlp fallback requires Deno at ~/.deno/bin/deno"
+            ) from pytubefix_error
+
+        output_template = os.path.join(audio_dir, f"{filename}.%(ext)s")
+        video_url = getattr(video, "watch_url", None)
+        if not video_url:
+            video_url = f"https://www.youtube.com/watch?v={video.video_id}"
+
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "yt_dlp",
+            "--no-playlist",
+            "--js-runtimes",
+            f"deno:{deno_path}",
+            "--remote-components",
+            "ejs:npm",
+            "-f",
+            "bestaudio[ext=m4a]/bestaudio",
+            "-o",
+            output_template,
+            video_url,
+        )
+        return_code = await process.wait()
+
+        if return_code != 0:
+            raise RuntimeError(
+                f"yt-dlp fallback failed with exit code {return_code}"
+            ) from pytubefix_error
+
+        candidates = sorted(
+            candidate
+            for candidate in glob.glob(
+                os.path.join(audio_dir, f"{filename}.*")
+            )
+            if not candidate.endswith((".part", ".ytdl", ".temp"))
+        )
+
+        if not candidates:
+            raise RuntimeError(
+                f"yt-dlp completed but produced no audio for {video.video_id}"
+            )
+
+        audio_file_path = max(candidates, key=os.path.getsize)
+        print(f"yt-dlp fallback downloaded: {audio_file_path}")
+        return audio_file_path, filename
 
 def estimate_whisper_transcription_cost(audio_duration_seconds):
     audio_duration_minutes = audio_duration_seconds / 60

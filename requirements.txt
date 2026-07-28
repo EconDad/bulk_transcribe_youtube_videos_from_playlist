@@ -9,3 +9,4 @@ openai
 pydub
 ruff
 tqdm
+yt-dlp[default]>=2026.7.4
