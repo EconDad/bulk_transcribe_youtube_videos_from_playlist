@@ -10,3 +10,5 @@ pydub
 ruff
 tqdm
 yt-dlp[default]>=2026.7.4
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*
