@@ -191,12 +191,17 @@ async def compute_transcript_with_whisper_from_audio_func(audio_file_path, audio
         ]
     else:
         print(f"Using local Whisper model for transcription of {audio_file_name}...")
-        if cuda.is_available() and not disable_cuda_override:
-            print("CUDA is available. Using GPU for transcription.")
+        import ctranslate2
+        cuda_device_count = ctranslate2.get_cuda_device_count()
+        if cuda_device_count > 0 and not disable_cuda_override:
+            print(
+                f"CUDA is available through CTranslate2 "
+                f"({cuda_device_count} device(s)). Using GPU for transcription."
+            )
             device = "cuda"
             compute_type = "float16"
         else:
-            print("CUDA not available. Using CPU for transcription.")
+            print("CUDA unavailable through CTranslate2. Using CPU for transcription.")
             device = "cpu"
             compute_type = "auto"
         model = WhisperModel("large-v3", device=device, compute_type=compute_type)
