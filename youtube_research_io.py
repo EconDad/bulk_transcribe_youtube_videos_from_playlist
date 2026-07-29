@@ -350,3 +350,77 @@ class TranscriptPackageWriter:
             if backup_dir.exists() and not final_dir.exists():
                 os.replace(backup_dir, final_dir)
             raise
+
+
+def plan_playlist_videos(
+    videos: Any,
+    manifest: ManifestStore,
+) -> dict[str, Any]:
+    """Select playlist videos for processing in stable playlist order.
+
+    Deduplication is strictly by YouTube video ID. Completed and currently
+    active manifest entries are skipped, while failed entries are retried.
+    """
+    selected_videos: list[Any] = []
+    selected_video_ids: list[str] = []
+    duplicate_video_ids: list[str] = []
+    completed_video_ids: list[str] = []
+    in_progress_video_ids: list[str] = []
+    retry_video_ids: list[str] = []
+
+    seen_video_ids: set[str] = set()
+    input_count = 0
+
+    for video in videos:
+        input_count += 1
+
+        video_id = str(getattr(video, "video_id", "") or "").strip()
+        if not video_id:
+            raise ValueError(
+                f"Playlist entry {input_count} has no usable video_id"
+            )
+
+        if video_id in seen_video_ids:
+            duplicate_video_ids.append(video_id)
+            continue
+
+        seen_video_ids.add(video_id)
+        existing = manifest.get(video_id)
+        status = existing.get("status") if existing else None
+
+        if status == "analysis_ready":
+            completed_video_ids.append(video_id)
+            continue
+
+        if status in {"queued", "transcribing"}:
+            in_progress_video_ids.append(video_id)
+            continue
+
+        if status == "transcription_failed":
+            retry_video_ids.append(video_id)
+
+        selected_videos.append(video)
+        selected_video_ids.append(video_id)
+
+    return {
+        "videos": selected_videos,
+        "input_count": input_count,
+        "unique_count": len(seen_video_ids),
+        "selected_video_ids": selected_video_ids,
+        "duplicate_video_ids": duplicate_video_ids,
+        "completed_video_ids": completed_video_ids,
+        "in_progress_video_ids": in_progress_video_ids,
+        "retry_video_ids": retry_video_ids,
+    }
+
+
+async def execute_playlist_plan(
+    plan: dict[str, Any],
+    worker: Any,
+) -> None:
+    """Run the worker only for videos selected by the playlist plan."""
+    import asyncio
+
+    tasks = [worker(video) for video in plan["videos"]]
+    if tasks:
+        await asyncio.gather(*tasks)

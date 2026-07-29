@@ -21,6 +21,8 @@ from youtube_research_io import (
     TranscriptPackageWriter,
     TranscriptQuality,
     VideoMetadata,
+    execute_playlist_plan,
+    plan_playlist_videos,
 )
 
 # Constants for pricing
@@ -327,6 +329,30 @@ async def process_video_or_playlist(url, max_simultaneous_downloads, max_workers
     download_semaphore = asyncio.Semaphore(max_simultaneous_downloads)
     manifest = ManifestStore(manifest_path)
 
+    if convert_single_video:
+        execution_plan = {
+            "videos": videos,
+            "input_count": len(videos),
+            "unique_count": len(videos),
+            "selected_video_ids": [video.video_id for video in videos],
+            "duplicate_video_ids": [],
+            "completed_video_ids": [],
+            "in_progress_video_ids": [],
+            "retry_video_ids": [],
+        }
+    else:
+        execution_plan = plan_playlist_videos(videos, manifest)
+        print(
+            "Playlist plan: "
+            f"{execution_plan['input_count']} entries, "
+            f"{execution_plan['unique_count']} unique, "
+            f"{len(execution_plan['selected_video_ids'])} selected, "
+            f"{len(execution_plan['duplicate_video_ids'])} duplicates, "
+            f"{len(execution_plan['completed_video_ids'])} completed, "
+            f"{len(execution_plan['in_progress_video_ids'])} in progress, "
+            f"{len(execution_plan['retry_video_ids'])} retries."
+        )
+
     async def download_and_transcribe(video):
         video_metadata = VideoMetadata(
             video_id=video.video_id,
@@ -383,8 +409,10 @@ async def process_video_or_playlist(url, max_simultaneous_downloads, max_workers
             traceback.print_exc()
             print(f"Error processing video {video.title}: {e}")
 
-    tasks = [download_and_transcribe(video) for video in videos]
-    await asyncio.gather(*tasks)
+    await execute_playlist_plan(
+        execution_plan,
+        download_and_transcribe,
+    )
 
 def normalize_logprobs(avg_logprob, min_logprob, max_logprob):
     range_logprob = max_logprob - min_logprob
