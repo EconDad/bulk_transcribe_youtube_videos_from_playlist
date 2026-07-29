@@ -424,3 +424,14 @@ async def execute_playlist_plan(
     tasks = [worker(video) for video in plan["videos"]]
     if tasks:
         await asyncio.gather(*tasks)
+
+
+async def execute_with_semaphore(
+    semaphore: Any,
+    operation: Any,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Execute one async operation while holding a shared semaphore."""
+    async with semaphore:
+        return await operation(*args, **kwargs)

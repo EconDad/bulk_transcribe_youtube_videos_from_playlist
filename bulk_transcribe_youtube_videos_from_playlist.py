@@ -22,6 +22,7 @@ from youtube_research_io import (
     TranscriptQuality,
     VideoMetadata,
     execute_playlist_plan,
+    execute_with_semaphore,
     plan_playlist_videos,
 )
 
@@ -327,6 +328,16 @@ async def process_video_or_playlist(url, max_simultaneous_downloads, max_workers
         videos = playlist.videos
 
     download_semaphore = asyncio.Semaphore(max_simultaneous_downloads)
+    transcription_slots = (
+        max(1, min(max_workers_transcribe, max_simultaneous_downloads))
+        if use_openai_api_for_transcription
+        else 1
+    )
+    transcription_semaphore = asyncio.Semaphore(transcription_slots)
+    print(
+        f"Download concurrency: {max_simultaneous_downloads}; "
+        f"transcription concurrency: {transcription_slots}"
+    )
     manifest = ManifestStore(manifest_path)
 
     if convert_single_video:
@@ -368,36 +379,43 @@ async def process_video_or_playlist(url, max_simultaneous_downloads, max_workers
         )
         manifest.queue(video_metadata)
         try:
-            async with download_semaphore:
-                manifest.transition(
-                    video_id=video_metadata.video_id,
-                    new_status="transcribing",
-                    title=video_metadata.title,
-                    url=video_metadata.source_url,
-                )
-                audio_path, audio_filename = await download_audio(video)
-                if not audio_path or not audio_filename:
-                    raise RuntimeError(f"Audio download failed for {video_metadata.video_id}")
+            manifest.transition(
+                video_id=video_metadata.video_id,
+                new_status="transcribing",
+                title=video_metadata.title,
+                url=video_metadata.source_url,
+            )
 
-                audio_file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
-                _, _, _, package_result, quality = await compute_transcript_with_whisper_from_audio_func(
-                    audio_path,
-                    audio_filename,
-                    audio_file_size_mb,
-                    video_metadata,
+            async with download_semaphore:
+                audio_path, audio_filename = await download_audio(video)
+
+            if not audio_path or not audio_filename:
+                raise RuntimeError(
+                    f"Audio download failed for {video_metadata.video_id}"
                 )
-                manifest.transition(
-                    video_id=video_metadata.video_id,
-                    new_status="analysis_ready",
-                    updates={
-                        "transcript_directory": str(package_result.directory),
-                        "transcript_formats": ["txt", "csv", "json"],
-                        "selected_format": quality.selected_format,
-                        "quality_status": quality.quality_status,
-                        "package_sha256": package_result.package_sha256,
-                        "ready_marker": str(package_result.directory / "_READY"),
-                    },
-                )
+
+            audio_file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+            _, _, _, package_result, quality = await execute_with_semaphore(
+                transcription_semaphore,
+                compute_transcript_with_whisper_from_audio_func,
+                audio_path,
+                audio_filename,
+                audio_file_size_mb,
+                video_metadata,
+            )
+
+            manifest.transition(
+                video_id=video_metadata.video_id,
+                new_status="analysis_ready",
+                updates={
+                    "transcript_directory": str(package_result.directory),
+                    "transcript_formats": ["txt", "csv", "json"],
+                    "selected_format": quality.selected_format,
+                    "quality_status": quality.quality_status,
+                    "package_sha256": package_result.package_sha256,
+                    "ready_marker": str(package_result.directory / "_READY"),
+                },
+            )
         except Exception as e:
             current = manifest.get(video_metadata.video_id)
             if current and current.get("status") in {"queued", "transcribing"}:

@@ -126,5 +126,41 @@ class PlaylistExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("queued", worker_calls)
         self.assertNotIn("transcribing", worker_calls)
 
+
+
+class SemaphoreExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_execute_with_semaphore_limits_peak_concurrency(self):
+        import asyncio
+
+        from youtube_research_io import execute_with_semaphore
+
+        semaphore = asyncio.Semaphore(1)
+        active = 0
+        peak_active = 0
+
+        async def operation(value):
+            nonlocal active, peak_active
+
+            active += 1
+            peak_active = max(peak_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return value
+
+        results = await asyncio.gather(
+            *[
+                execute_with_semaphore(
+                    semaphore,
+                    operation,
+                    value,
+                )
+                for value in range(4)
+            ]
+        )
+
+        self.assertEqual(results, [0, 1, 2, 3])
+        self.assertEqual(peak_active, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
