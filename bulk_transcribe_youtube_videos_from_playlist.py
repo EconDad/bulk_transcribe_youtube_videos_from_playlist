@@ -37,7 +37,6 @@ max_simultaneous_youtube_downloads = 4
 disable_cuda_override = 0
 single_video_url = 'https://www.youtube.com/watch?v=sWAaJF9Wk0w'
 playlist_url = 'https://www.youtube.com/playlist?list=PLjpPMe3LP1XKgqqzqz4j6M8-_M_soYxiV'
-
 if convert_single_video:
     print(f"Processing a single video: {single_video_url}")
 else:
@@ -169,6 +168,14 @@ async def download_audio(video):
             f"deno:{deno_path}",
             "--remote-components",
             "ejs:npm",
+            "--retries",
+            "10",
+            "--fragment-retries",
+            "10",
+            "--retry-sleep",
+            "http:linear=1::2",
+            "--socket-timeout",
+            "30",
             "-f",
             "bestaudio[ext=m4a]/bestaudio",
             "-o",
