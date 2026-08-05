@@ -81,6 +81,29 @@ class ModelClientTests(unittest.TestCase):
                 stage="inventory chunk 1/3",
             )
 
+    def test_empty_content_reports_ollama_generation_metadata(self):
+        client = OllamaJsonClient(
+            transport=FakeTransport(
+                {
+                    "message": {
+                        "content": "",
+                        "thinking": "internal reasoning",
+                    },
+                    "done_reason": "length",
+                    "eval_count": 1536,
+                }
+            )
+        )
+        with self.assertRaisesRegex(
+            ModelClientError,
+            r"done_reason=length.*eval_count=1536.*thinking_chars=18",
+        ):
+            client.complete_json(
+                system_prompt="System",
+                user_prompt="User",
+                stage="formula_entailment CALC_0001/example",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

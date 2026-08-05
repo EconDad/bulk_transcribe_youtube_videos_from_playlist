@@ -42,12 +42,13 @@ from research_v43.expression_ast import (
     DerivationType,
     FormulaCandidate,
 )
-from research_v43.model_client import OllamaJsonClient
+from research_v43.model_client import ModelClientError, OllamaJsonClient
 
 
 PROMPT_VERSION = "phase4-qwen3-v4.3-stage-cd.1"
-ENTAILMENT_PROMPT_VERSION = "phase4-qwen3-v4.3-entailment-cd.3"
-PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.3"
+ENTAILMENT_PROMPT_VERSION = "phase4-qwen3-v4.3-entailment-cd.3.1"
+PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.3.1"
+ENTAILMENT_INFERENCE_MODE = "direct-json-no-thinking-v1"
 INVENTORY_SYSTEM_PROMPT = (
     "You identify source-grounded calculation events. Return strict JSON. "
     "Do not inject outside formulas or subject-matter knowledge."
@@ -327,6 +328,7 @@ def _checkpointed_model_call(
     resume: bool,
     num_predict: int,
     invocations: list[dict[str, Any]],
+    think: bool | None = None,
 ) -> Mapping[str, Any]:
     cached = (
         _load_checkpoint(checkpoint, expected=expected)
@@ -338,16 +340,35 @@ def _checkpointed_model_call(
         invocations.append({"stage": stage, "cache_hit": True})
         return cached["response_payload"]
 
+    resolved_think = client.think if think is None else bool(think)
     _log(
         f"START {stage}; prompt_chars={len(user_prompt)}; "
-        f"num_predict={num_predict}"
+        f"num_predict={num_predict}; "
+        f"think={str(resolved_think).lower()}"
     )
-    response = client.complete_json(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        stage=stage,
-        num_predict=num_predict,
-    )
+    try:
+        response = client.complete_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            stage=stage,
+            num_predict=num_predict,
+            think=resolved_think,
+        )
+    except ModelClientError as exc:
+        if "response message content is empty" not in str(exc):
+            raise
+        retry_num_predict = max(num_predict, 2048)
+        _log(
+            f"RETRY {stage}; empty model content; "
+            f"num_predict={retry_num_predict}; think=false"
+        )
+        response = client.complete_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            stage=stage,
+            num_predict=retry_num_predict,
+            think=False,
+        )
     _atomic_write_json(
         checkpoint,
         {
@@ -468,6 +489,7 @@ def run_pipeline(
             resume=resume,
             num_predict=detail_num_predict,
             invocations=invocations,
+            think=True,
         )
         try:
             extraction = parse_formula_extraction_response(
@@ -556,10 +578,12 @@ def run_pipeline(
                     "calculation_id": item.calculation_id,
                     "formula_id": candidate.formula_id,
                     "candidate_sha256": candidate_sha,
+                    "inference_mode": ENTAILMENT_INFERENCE_MODE,
                 },
                 resume=resume,
                 num_predict=detail_num_predict,
                 invocations=invocations,
+                think=False,
             )
             try:
                 report = validate_entailment_response(

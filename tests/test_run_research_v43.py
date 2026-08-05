@@ -14,9 +14,12 @@ class FakeClient:
     def __init__(self, payloads):
         self.payloads = list(payloads)
         self.calls = 0
+        self.call_kwargs = []
+        self.think = True
 
     def complete_json(self, *, system_prompt, user_prompt, **kwargs):
         self.calls += 1
+        self.call_kwargs.append(dict(kwargs))
         if not self.payloads:
             raise AssertionError("Unexpected model call")
         return JsonModelResponse(
@@ -198,6 +201,9 @@ class RunnerTests(unittest.TestCase):
                 formulas["formulas"][0]["derivation_type"],
                 "stated",
             )
+            self.assertIsNone(client.call_kwargs[0].get("think"))
+            self.assertTrue(client.call_kwargs[1]["think"])
+            self.assertFalse(client.call_kwargs[2]["think"])
 
     def test_visual_cue_is_persisted_as_review_required(self):
         inventory = {
@@ -497,6 +503,7 @@ class RunnerTests(unittest.TestCase):
                 formulas["formulas"][0]["derivation_type"],
                 "derived",
             )
+
 
 
 if __name__ == "__main__":

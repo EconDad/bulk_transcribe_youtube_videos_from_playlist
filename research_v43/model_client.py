@@ -76,6 +76,9 @@ class ModelInvocation:
     num_predict: int = 0
     keep_alive: str = ""
     elapsed_seconds: float = 0.0
+    done_reason: str = ""
+    eval_count: int = 0
+    thinking_chars: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -88,6 +91,9 @@ class ModelInvocation:
             "num_predict": self.num_predict,
             "keep_alive": self.keep_alive,
             "elapsed_seconds": round(self.elapsed_seconds, 3),
+            "done_reason": self.done_reason,
+            "eval_count": self.eval_count,
+            "thinking_chars": self.thinking_chars,
         }
 
 
@@ -195,9 +201,28 @@ class OllamaJsonClient:
                 f"{normalized_stage}: Ollama response is missing message"
             )
         content = message.get("content")
+        thinking = message.get("thinking")
+        thinking_text = thinking if isinstance(thinking, str) else ""
+        done_reason_raw = response.get("done_reason")
+        done_reason = (
+            done_reason_raw
+            if isinstance(done_reason_raw, str)
+            else ""
+        )
+        eval_count_raw = response.get("eval_count")
+        eval_count = (
+            eval_count_raw
+            if isinstance(eval_count_raw, int)
+            else 0
+        )
         if not isinstance(content, str) or not content.strip():
             raise ModelClientError(
-                f"{normalized_stage}: Ollama response message content is empty"
+                f"{normalized_stage}: Ollama response message content is empty "
+                f"(done_reason={done_reason or 'unknown'}, "
+                f"eval_count={eval_count}, "
+                f"thinking_chars={len(thinking_text)}, "
+                f"num_predict={resolved_num_predict}, "
+                f"think={str(resolved_think).lower()})"
             )
 
         try:
@@ -221,6 +246,9 @@ class OllamaJsonClient:
             num_predict=resolved_num_predict,
             keep_alive=self.keep_alive,
             elapsed_seconds=elapsed,
+            done_reason=done_reason,
+            eval_count=eval_count,
+            thinking_chars=len(thinking_text),
         )
         return JsonModelResponse(
             payload=dict(decoded_content),
