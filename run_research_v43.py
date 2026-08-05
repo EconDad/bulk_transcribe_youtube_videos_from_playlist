@@ -444,9 +444,33 @@ def run_pipeline(
                 extraction_payload,
                 item=item,
             )
-        except Exception:
+        except Exception as exc:
             extraction_checkpoint.unlink(missing_ok=True)
-            raise
+            reason = (
+                "Invalid formula extraction response: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            _log(
+                f"REJECT formula_extraction "
+                f"{item.calculation_id}: {reason}"
+            )
+            rejected_formulas.append(
+                {
+                    "calculation_id": item.calculation_id,
+                    "stage": "formula_extraction_validation",
+                    "reason": reason,
+                    "model_response": dict(extraction_payload),
+                }
+            )
+            resolutions.append(
+                {
+                    "calculation_id": item.calculation_id,
+                    "state": "formula_rejected",
+                    "formula_ids": [],
+                    "reason": reason,
+                }
+            )
+            continue
 
         if extraction.disposition is not ExtractionDisposition.CANDIDATES_PROPOSED:
             state_map = {
@@ -514,9 +538,36 @@ def run_pipeline(
                     candidate=candidate,
                     segments=segments,
                 )
-            except Exception:
+            except Exception as exc:
                 entailment_checkpoint.unlink(missing_ok=True)
-                raise
+                reason = (
+                    "Invalid entailment response: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                _log(
+                    f"REJECT {entailment_stage}: {reason}"
+                )
+                entailment_reports.append(
+                    {
+                        "calculation_id": item.calculation_id,
+                        "formula_id": candidate.formula_id,
+                        "passed": False,
+                        "issues": [reason],
+                        "nodes": [],
+                    }
+                )
+                rejected_formulas.append(
+                    {
+                        "calculation_id": item.calculation_id,
+                        "formula_id": candidate.formula_id,
+                        "stage": "entailment_validation",
+                        "reason": reason,
+                        "candidate": candidate.to_dict(),
+                        "model_response": dict(entailment_payload),
+                    }
+                )
+                continue
+
             entailment_reports.append(report.to_dict())
 
             if report.passed:

@@ -162,9 +162,9 @@ class NodeEntailment:
                     "entailed node requires evidence"
                 )
         else:
-            if not dependencies:
+            if not dependencies and not evidence:
                 raise EntailmentValidationError(
-                    "derived node requires dependencies"
+                    "derived node requires dependencies or evidence"
                 )
             if not derivation_step:
                 raise EntailmentValidationError(
@@ -329,6 +329,10 @@ def validate_entailment_response(
         issues.append(f"Unknown node entailments: {sorted(extra)}")
 
     variable_phrases = _variable_phrases(candidate)
+    parsed_order = {
+        node.node_id: index
+        for index, node in enumerate(candidate.parsed.operations)
+    }
 
     for node_id in sorted(set(parsed_by_id) & set(provided_by_id)):
         parsed_node = parsed_by_id[node_id]
@@ -359,7 +363,15 @@ def validate_entailment_response(
                 )
             combined_evidence.append(source_text)
 
-        if record.status is NodeStatus.ENTAILED:
+        requires_direct_grounding = (
+            record.status is NodeStatus.ENTAILED
+            or (
+                record.status is NodeStatus.DERIVED
+                and not record.depends_on_node_ids
+            )
+        )
+
+        if requires_direct_grounding:
             evidence_text = " ".join(combined_evidence)
             if not _has_operation_cue(record.operation, evidence_text):
                 issues.append(
@@ -396,6 +408,14 @@ def validate_entailment_response(
                 )
             if dependency == node_id:
                 issues.append(f"{node_id} cannot depend on itself")
+            if (
+                dependency in parsed_order
+                and node_id in parsed_order
+                and parsed_order[dependency] >= parsed_order[node_id]
+            ):
+                issues.append(
+                    f"{node_id} must depend only on earlier AST nodes"
+                )
 
     issues.extend(_dependency_cycle_issues(nodes))
 

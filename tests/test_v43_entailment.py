@@ -3,7 +3,10 @@ from __future__ import annotations
 import unittest
 
 from research_v43.calculation_inventory import CalculationItem
-from research_v43.entailment import validate_entailment_response
+from research_v43.entailment import (
+    EntailmentValidationError,
+    validate_entailment_response,
+)
 from research_v43.expression_ast import FormulaCandidate
 
 
@@ -251,6 +254,87 @@ class EntailmentTests(unittest.TestCase):
             any("quote is not present" in issue for issue in report.issues)
         )
 
+
+
+    def test_single_derived_node_can_use_direct_evidence(self):
+        segments = [
+            {"text": "Divide the total value by the item count."},
+            {"text": "That gives the result."},
+        ]
+        candidate = make_candidate()
+        node = candidate.parsed.operations[0]
+
+        report = validate_entailment_response(
+            {
+                "calculation_id": "CALC_0001",
+                "formula_id": "normalized_measurement",
+                "nodes": [
+                    {
+                        "node_id": node.node_id,
+                        "expression": node.expression,
+                        "operation": node.operation,
+                        "status": "derived",
+                        "evidence": [
+                            {
+                                "start_segment": 0,
+                                "end_segment": 0,
+                                "quote": (
+                                    "Divide the total value by the item count."
+                                ),
+                            }
+                        ],
+                        "depends_on_node_ids": [],
+                        "derivation_step": (
+                            "Normalize the directly stated relationship "
+                            "as a symbolic equation."
+                        ),
+                    }
+                ],
+            },
+            item=make_item(),
+            candidate=candidate,
+            segments=segments,
+        )
+
+        self.assertTrue(report.passed, report.issues)
+
+    def test_derived_node_requires_dependency_or_evidence(self):
+        candidate = make_candidate()
+        node = candidate.parsed.operations[0]
+
+        with self.assertRaisesRegex(
+            EntailmentValidationError,
+            "dependencies or evidence",
+        ):
+            validate_entailment_response(
+                {
+                    "calculation_id": "CALC_0001",
+                    "formula_id": "normalized_measurement",
+                    "nodes": [
+                        {
+                            "node_id": node.node_id,
+                            "expression": node.expression,
+                            "operation": node.operation,
+                            "status": "derived",
+                            "evidence": [],
+                            "depends_on_node_ids": [],
+                            "derivation_step": (
+                                "Derive the expression."
+                            ),
+                        }
+                    ],
+                },
+                item=make_item(),
+                candidate=candidate,
+                segments=[
+                    {
+                        "text": (
+                            "Divide the total value by the item count."
+                        )
+                    },
+                    {"text": "That gives the result."},
+                ],
+            )
 
 if __name__ == "__main__":
     unittest.main()

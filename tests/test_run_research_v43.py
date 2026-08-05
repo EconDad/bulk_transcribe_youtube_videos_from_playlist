@@ -265,5 +265,99 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(second_client.calls, 0)
 
 
+
+    def test_invalid_entailment_is_rejected_without_crashing(self):
+        candidate_data = candidate_payload()
+        candidate = FormulaCandidate.from_mapping(candidate_data)
+        node = candidate.parsed.operations[0]
+
+        inventory = {
+            "schema_version": "1.0",
+            "video_id": "video-123",
+            "calculations": [
+                {
+                    "calculation_id": "CALC_0001",
+                    "name": "Normalize a measurement",
+                    "source_mode": "spoken",
+                    "start_segment": 0,
+                    "end_segment": 0,
+                    "variables_mentioned": [
+                        "total value",
+                        "item count",
+                    ],
+                    "operations_mentioned": ["division"],
+                    "visual_equation_cue": False,
+                    "formula_expected": True,
+                    "reason": "The speaker states a division.",
+                }
+            ],
+        }
+        extraction = {
+            "calculation_id": "CALC_0001",
+            "disposition": "candidates_proposed",
+            "reason": "A candidate was proposed.",
+            "candidates": [candidate_data],
+        }
+        invalid_entailment = {
+            "calculation_id": "CALC_0001",
+            "formula_id": "normalized_measurement",
+            "nodes": [
+                {
+                    "node_id": node.node_id,
+                    "expression": node.expression,
+                    "operation": node.operation,
+                    "status": "derived",
+                    "evidence": [],
+                    "depends_on_node_ids": [],
+                    "derivation_step": "Derive the expression.",
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            raw_root = base / "Raw Transcripts"
+            write_source(
+                raw_root,
+                "video-123",
+                ["Divide the total value by the item count."],
+            )
+
+            client = FakeClient(
+                [
+                    inventory,
+                    extraction,
+                    invalid_entailment,
+                ]
+            )
+
+            exit_code, package = run_pipeline(
+                video_id="video-123",
+                client=client,
+                raw_root=raw_root,
+                output_root=base / "Diagnostics",
+                progress_root=base / "Progress",
+            )
+
+            self.assertEqual(exit_code, 2)
+            self.assertTrue((package / "_READY").is_file())
+
+            rejected = json.loads(
+                (package / "rejected_formulas.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                rejected["rejected_formulas"][0]["stage"],
+                "entailment_validation",
+            )
+
+            coverage = json.loads(
+                (package / "formula_coverage.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertFalse(coverage["passed"])
+
 if __name__ == "__main__":
     unittest.main()
