@@ -91,6 +91,15 @@ def candidate_payload():
     }
 
 
+def grounding(identifier, quote):
+    return {
+        "identifier": identifier,
+        "start_segment": 0,
+        "end_segment": 0,
+        "quote": quote,
+    }
+
+
 class RunnerTests(unittest.TestCase):
     def test_complete_spoken_formula_pipeline(self):
         candidate = FormulaCandidate.from_mapping(candidate_payload())
@@ -133,9 +142,18 @@ class RunnerTests(unittest.TestCase):
                             "start_segment": 0,
                             "end_segment": 0,
                             "quote": (
-                                "Divide the total value by the item count."
+                                "Divide the total value by the item count "
+                                "to get the normalized measurement."
                             ),
                         }
+                    ],
+                    "identifier_groundings": [
+                        grounding("total_value", "total value"),
+                        grounding("item_count", "item count"),
+                        grounding(
+                            "normalized_measurement",
+                            "normalized measurement",
+                        ),
                     ],
                     "depends_on_node_ids": [],
                     "derivation_step": "",
@@ -150,7 +168,10 @@ class RunnerTests(unittest.TestCase):
             write_source(
                 raw_root,
                 "video-123",
-                ["Divide the total value by the item count."],
+                [
+                    "Divide the total value by the item count to get "
+                    "the normalized measurement."
+                ],
             )
             client = FakeClient([inventory, extraction, entailment])
             exit_code, package = run_pipeline(
@@ -173,6 +194,10 @@ class RunnerTests(unittest.TestCase):
                 (package / "formulas.json").read_text(encoding="utf-8")
             )
             self.assertEqual(len(formulas["formulas"]), 1)
+            self.assertEqual(
+                formulas["formulas"][0]["derivation_type"],
+                "stated",
+            )
 
     def test_visual_cue_is_persisted_as_review_required(self):
         inventory = {
@@ -214,7 +239,6 @@ class RunnerTests(unittest.TestCase):
             )
             self.assertEqual(coverage["visual_review_required"], 1)
             self.assertFalse(coverage["passed"])
-
 
     def test_chunked_inventory_resumes_without_model_calls(self):
         empty_first = {
@@ -264,8 +288,6 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertEqual(second_client.calls, 0)
 
-
-
     def test_invalid_entailment_is_rejected_without_crashing(self):
         candidate_data = candidate_payload()
         candidate = FormulaCandidate.from_mapping(candidate_data)
@@ -308,6 +330,7 @@ class RunnerTests(unittest.TestCase):
                     "operation": node.operation,
                     "status": "derived",
                     "evidence": [],
+                    "identifier_groundings": [],
                     "depends_on_node_ids": [],
                     "derivation_step": "Derive the expression.",
                 }
@@ -324,11 +347,7 @@ class RunnerTests(unittest.TestCase):
             )
 
             client = FakeClient(
-                [
-                    inventory,
-                    extraction,
-                    invalid_entailment,
-                ]
+                [inventory, extraction, invalid_entailment]
             )
 
             exit_code, package = run_pipeline(
@@ -358,6 +377,127 @@ class RunnerTests(unittest.TestCase):
                 )
             )
             self.assertFalse(coverage["passed"])
+
+    def test_derived_entailment_normalizes_candidate_classification(self):
+        sentence = (
+            "The offered amount is 30, which is 10 less than the "
+            "reference amount."
+        )
+        derived_candidate = {
+            "calculation_id": "CALC_0001",
+            "formula_id": "amount_difference",
+            "name": "Amount difference",
+            "ascii": "difference = reference_amount - offered_amount",
+            "latex": "d=r-o",
+            "derivation_type": "stated",
+            "variables": [
+                {
+                    "symbol": "difference",
+                    "meaning": "difference",
+                    "unit": "units",
+                },
+                {
+                    "symbol": "reference_amount",
+                    "meaning": "reference amount",
+                    "unit": "units",
+                },
+                {
+                    "symbol": "offered_amount",
+                    "meaning": "offered amount",
+                    "unit": "units",
+                },
+            ],
+            "derivation_steps": [
+                "Rearrange the stated less-than relationship."
+            ],
+            "source_claims": [
+                {
+                    "start_segment": 0,
+                    "end_segment": 0,
+                    "relationship": (
+                        "offered_amount = reference_amount - difference"
+                    ),
+                }
+            ],
+        }
+        candidate = FormulaCandidate.from_mapping(derived_candidate)
+        node = candidate.parsed.operations[0]
+        inventory = {
+            "schema_version": "1.0",
+            "video_id": "video-123",
+            "calculations": [
+                {
+                    "calculation_id": "CALC_0001",
+                    "name": "Amount difference",
+                    "source_mode": "spoken",
+                    "start_segment": 0,
+                    "end_segment": 0,
+                    "variables_mentioned": ["30", "10"],
+                    "operations_mentioned": ["subtraction"],
+                    "visual_equation_cue": False,
+                    "formula_expected": True,
+                    "reason": "The source states a less-than relationship.",
+                }
+            ],
+        }
+        extraction = {
+            "calculation_id": "CALC_0001",
+            "disposition": "candidates_proposed",
+            "reason": "The source supports a formula.",
+            "candidates": [derived_candidate],
+        }
+        entailment = {
+            "calculation_id": "CALC_0001",
+            "formula_id": "amount_difference",
+            "nodes": [
+                {
+                    "node_id": node.node_id,
+                    "expression": node.expression,
+                    "operation": node.operation,
+                    "status": "derived",
+                    "evidence": [
+                        {
+                            "start_segment": 0,
+                            "end_segment": 0,
+                            "quote": sentence,
+                        }
+                    ],
+                    "identifier_groundings": [
+                        grounding("difference", "10 less"),
+                        grounding("reference_amount", "reference amount"),
+                        grounding("offered_amount", "offered amount"),
+                    ],
+                    "depends_on_node_ids": [],
+                    "derivation_step": (
+                        "Rearrange offered_amount = reference_amount "
+                        "- difference to solve for difference."
+                    ),
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            raw_root = base / "Raw Transcripts"
+            write_source(raw_root, "video-123", [sentence])
+            client = FakeClient([inventory, extraction, entailment])
+            exit_code, package = run_pipeline(
+                video_id="video-123",
+                client=client,
+                raw_root=raw_root,
+                output_root=base / "Diagnostics",
+                progress_root=base / "Progress",
+            )
+
+            self.assertEqual(exit_code, 0)
+            formulas = json.loads(
+                (package / "formulas.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                formulas["formulas"][0]["derivation_type"],
+                "derived",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

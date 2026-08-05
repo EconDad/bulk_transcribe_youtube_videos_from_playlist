@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated v4.3 Stage C-D.1 diagnostic runner.
+"""Isolated v4.3 Stage C-D.3 diagnostic runner.
 
 This runner does not replace or import the production v4.1.1 runner.
 """
@@ -7,6 +7,7 @@ This runner does not replace or import the production v4.1.1 runner.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from datetime import datetime
 import hashlib
 import json
@@ -27,6 +28,8 @@ from research_v43.calculation_inventory import (
 )
 from research_v43.coverage import reconcile_coverage
 from research_v43.entailment import (
+    FormulaEntailmentReport,
+    NodeStatus,
     build_entailment_prompt,
     validate_entailment_response,
 )
@@ -35,10 +38,16 @@ from research_v43.formula_extraction import (
     build_formula_extraction_prompt,
     parse_formula_extraction_response,
 )
+from research_v43.expression_ast import (
+    DerivationType,
+    FormulaCandidate,
+)
 from research_v43.model_client import OllamaJsonClient
 
 
 PROMPT_VERSION = "phase4-qwen3-v4.3-stage-cd.1"
+ENTAILMENT_PROMPT_VERSION = "phase4-qwen3-v4.3-entailment-cd.3"
+PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.3"
 INVENTORY_SYSTEM_PROMPT = (
     "You identify source-grounded calculation events. Return strict JSON. "
     "Do not inject outside formulas or subject-matter knowledge."
@@ -356,6 +365,27 @@ def _checkpointed_model_call(
     return response.payload
 
 
+def _normalize_derivation_classification(
+    candidate: FormulaCandidate,
+    report: FormulaEntailmentReport,
+) -> FormulaCandidate:
+    """Promote stated formulas when validated nodes require derivation."""
+
+    has_derived_node = any(
+        node.status is NodeStatus.DERIVED
+        for node in report.nodes
+    )
+    if (
+        candidate.derivation_type is DerivationType.STATED
+        and has_derived_node
+    ):
+        return replace(
+            candidate,
+            derivation_type=DerivationType.DERIVED,
+        )
+    return candidate
+
+
 def run_pipeline(
     *,
     video_id: str,
@@ -402,7 +432,7 @@ def run_pipeline(
                     "state": "visual_review_required",
                     "formula_ids": [],
                     "reason": (
-                        "The source announces a visual equation; Stage C-D.1 "
+                        "The source announces a visual equation; Stage C-D.3 "
                         "does not yet perform frame recovery."
                     ),
                 }
@@ -521,7 +551,7 @@ def run_pipeline(
                     "schema_version": "1.0",
                     "video_id": video_id,
                     "source_package_sha256": source_sha,
-                    "prompt_version": PROMPT_VERSION,
+                    "prompt_version": ENTAILMENT_PROMPT_VERSION,
                     "stage": "formula_entailment",
                     "calculation_id": item.calculation_id,
                     "formula_id": candidate.formula_id,
@@ -571,7 +601,17 @@ def run_pipeline(
             entailment_reports.append(report.to_dict())
 
             if report.passed:
-                retained_formulas.append(candidate.to_dict())
+                retained_candidate = _normalize_derivation_classification(
+                    candidate,
+                    report,
+                )
+                if retained_candidate is not candidate:
+                    _log(
+                        "NORMALIZE derivation_type "
+                        f"{item.calculation_id}/{candidate.formula_id}: "
+                        "stated -> derived"
+                    )
+                retained_formulas.append(retained_candidate.to_dict())
                 accepted_ids.append(candidate.formula_id)
             else:
                 rejected_formulas.append(
@@ -648,7 +688,7 @@ def run_pipeline(
         output_root=output_root,
         video_id=video_id,
         source_package_sha256=source_sha,
-        prompt_version=PROMPT_VERSION,
+        prompt_version=PACKAGE_VERSION,
         payloads=payloads,
     )
     return (0 if coverage.passed else 2), result.package_dir
@@ -657,7 +697,7 @@ def run_pipeline(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run isolated research pipeline v4.3 Stage C-D.1 diagnostics."
+            "Run isolated research pipeline v4.3 Stage C-D.3 diagnostics."
         )
     )
     parser.add_argument("video_id")

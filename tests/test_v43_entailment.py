@@ -82,6 +82,15 @@ def make_candidate(ascii_formula="result = total_value / item_count"):
     )
 
 
+def grounding(identifier, segment, quote):
+    return {
+        "identifier": identifier,
+        "start_segment": segment,
+        "end_segment": segment,
+        "quote": quote,
+    }
+
+
 class EntailmentTests(unittest.TestCase):
     def test_direct_single_node_entailment_passes(self):
         segments = [
@@ -109,6 +118,11 @@ class EntailmentTests(unittest.TestCase):
                                 ),
                             }
                         ],
+                        "identifier_groundings": [
+                            grounding("total_value", 0, "total value"),
+                            grounding("item_count", 0, "item count"),
+                            grounding("result", 1, "result"),
+                        ],
                         "depends_on_node_ids": [],
                         "derivation_step": "",
                     }
@@ -123,7 +137,12 @@ class EntailmentTests(unittest.TestCase):
     def test_multi_operator_nodes_can_use_dependencies(self):
         segments = [
             {"text": "Add the first value and the second value."},
-            {"text": "Then divide that total by the item count."},
+            {
+                "text": (
+                    "Then divide that total by the item count to get "
+                    "the result."
+                )
+            },
         ]
         candidate = make_candidate(
             "result = (first_value + second_value) / item_count"
@@ -148,6 +167,10 @@ class EntailmentTests(unittest.TestCase):
                                 ),
                             }
                         ],
+                        "identifier_groundings": [
+                            grounding("first_value", 0, "first value"),
+                            grounding("second_value", 0, "second value"),
+                        ],
                         "depends_on_node_ids": [],
                         "derivation_step": "",
                     },
@@ -161,9 +184,14 @@ class EntailmentTests(unittest.TestCase):
                                 "start_segment": 1,
                                 "end_segment": 1,
                                 "quote": (
-                                    "Then divide that total by the item count."
+                                    "Then divide that total by the item count "
+                                    "to get the result."
                                 ),
                             }
+                        ],
+                        "identifier_groundings": [
+                            grounding("item_count", 1, "item count"),
+                            grounding("result", 1, "result"),
                         ],
                         "depends_on_node_ids": [first.node_id],
                         "derivation_step": "",
@@ -202,6 +230,11 @@ class EntailmentTests(unittest.TestCase):
                                 ),
                             }
                         ],
+                        "identifier_groundings": [
+                            grounding("total_value", 0, "total value"),
+                            grounding("item_count", 0, "item count"),
+                            grounding("result", 1, "result"),
+                        ],
                         "depends_on_node_ids": [],
                         "derivation_step": "",
                     }
@@ -216,7 +249,7 @@ class EntailmentTests(unittest.TestCase):
             any("lacks a cue" in issue for issue in report.issues)
         )
 
-    def test_non_exact_quote_fails(self):
+    def test_non_exact_operation_quote_fails(self):
         segments = [
             {"text": "Divide the total value by the item count."},
             {"text": "That gives the result."},
@@ -240,6 +273,11 @@ class EntailmentTests(unittest.TestCase):
                                 "quote": "Divide a different value.",
                             }
                         ],
+                        "identifier_groundings": [
+                            grounding("total_value", 0, "total value"),
+                            grounding("item_count", 0, "item count"),
+                            grounding("result", 1, "result"),
+                        ],
                         "depends_on_node_ids": [],
                         "derivation_step": "",
                     }
@@ -254,7 +292,196 @@ class EntailmentTests(unittest.TestCase):
             any("quote is not present" in issue for issue in report.issues)
         )
 
+    def test_identifier_grounding_can_use_source_paraphrase(self):
+        sentence = (
+            "The offered amount is $30, which is $10 less than what the "
+            "analyst thought the asset was worth."
+        )
+        item = CalculationItem.from_mapping(
+            {
+                "calculation_id": "CALC_0001",
+                "name": "Difference example",
+                "source_mode": "spoken",
+                "start_segment": 0,
+                "end_segment": 0,
+                "variables_mentioned": ["$30", "$10"],
+                "operations_mentioned": ["subtraction"],
+                "visual_equation_cue": False,
+                "formula_expected": True,
+                "reason": "The source states a less-than relationship.",
+            }
+        )
+        candidate = FormulaCandidate.from_mapping(
+            {
+                "calculation_id": "CALC_0001",
+                "formula_id": "amount_difference",
+                "name": "Amount difference",
+                "ascii": "difference = reference_amount - offered_amount",
+                "latex": "d=r-o",
+                "derivation_type": "stated",
+                "variables": [
+                    {
+                        "symbol": "difference",
+                        "meaning": "difference between amounts",
+                        "unit": "USD",
+                    },
+                    {
+                        "symbol": "reference_amount",
+                        "meaning": "analyst's estimated worth",
+                        "unit": "USD",
+                    },
+                    {
+                        "symbol": "offered_amount",
+                        "meaning": "offered amount",
+                        "unit": "USD",
+                    },
+                ],
+                "derivation_steps": [
+                    "Rearrange the directly stated less-than relationship."
+                ],
+                "source_claims": [
+                    {
+                        "start_segment": 0,
+                        "end_segment": 0,
+                        "relationship": (
+                            "offered_amount = reference_amount - difference"
+                        ),
+                    }
+                ],
+            }
+        )
+        node = candidate.parsed.operations[0]
+        report = validate_entailment_response(
+            {
+                "calculation_id": "CALC_0001",
+                "formula_id": "amount_difference",
+                "nodes": [
+                    {
+                        "node_id": node.node_id,
+                        "expression": node.expression,
+                        "operation": node.operation,
+                        "status": "derived",
+                        "evidence": [
+                            {
+                                "start_segment": 0,
+                                "end_segment": 0,
+                                "quote": sentence,
+                            }
+                        ],
+                        "identifier_groundings": [
+                            grounding(
+                                "reference_amount",
+                                0,
+                                "what the analyst thought the asset was worth",
+                            ),
+                            grounding("offered_amount", 0, "$30"),
+                            grounding("difference", 0, "$10 less"),
+                        ],
+                        "depends_on_node_ids": [],
+                        "derivation_step": (
+                            "Rearrange offered_amount = reference_amount "
+                            "- difference to solve for difference."
+                        ),
+                    }
+                ],
+            },
+            item=item,
+            candidate=candidate,
+            segments=[{"text": sentence}],
+        )
+        self.assertTrue(report.passed, report.issues)
 
+    def test_missing_identifier_grounding_fails(self):
+        segments = [
+            {"text": "Divide the total value by the item count."},
+            {"text": "That gives the result."},
+        ]
+        candidate = make_candidate()
+        node = candidate.parsed.operations[0]
+        report = validate_entailment_response(
+            {
+                "calculation_id": "CALC_0001",
+                "formula_id": "normalized_measurement",
+                "nodes": [
+                    {
+                        "node_id": node.node_id,
+                        "expression": node.expression,
+                        "operation": node.operation,
+                        "status": "entailed",
+                        "evidence": [
+                            {
+                                "start_segment": 0,
+                                "end_segment": 0,
+                                "quote": (
+                                    "Divide the total value by the item count."
+                                ),
+                            }
+                        ],
+                        "identifier_groundings": [
+                            grounding("total_value", 0, "total value"),
+                            grounding("item_count", 0, "item count"),
+                        ],
+                        "depends_on_node_ids": [],
+                        "derivation_step": "",
+                    }
+                ],
+            },
+            item=make_item(),
+            candidate=candidate,
+            segments=segments,
+        )
+        self.assertFalse(report.passed)
+        self.assertTrue(
+            any("result" in issue for issue in report.issues)
+        )
+
+    def test_non_exact_identifier_grounding_quote_fails(self):
+        segments = [
+            {"text": "Divide the total value by the item count."},
+            {"text": "That gives the result."},
+        ]
+        candidate = make_candidate()
+        node = candidate.parsed.operations[0]
+        report = validate_entailment_response(
+            {
+                "calculation_id": "CALC_0001",
+                "formula_id": "normalized_measurement",
+                "nodes": [
+                    {
+                        "node_id": node.node_id,
+                        "expression": node.expression,
+                        "operation": node.operation,
+                        "status": "entailed",
+                        "evidence": [
+                            {
+                                "start_segment": 0,
+                                "end_segment": 0,
+                                "quote": (
+                                    "Divide the total value by the item count."
+                                ),
+                            }
+                        ],
+                        "identifier_groundings": [
+                            grounding("total_value", 0, "different total"),
+                            grounding("item_count", 0, "item count"),
+                            grounding("result", 1, "result"),
+                        ],
+                        "depends_on_node_ids": [],
+                        "derivation_step": "",
+                    }
+                ],
+            },
+            item=make_item(),
+            candidate=candidate,
+            segments=segments,
+        )
+        self.assertFalse(report.passed)
+        self.assertTrue(
+            any(
+                "grounding quote for total_value" in issue
+                for issue in report.issues
+            )
+        )
 
     def test_single_derived_node_can_use_direct_evidence(self):
         segments = [
@@ -263,7 +490,6 @@ class EntailmentTests(unittest.TestCase):
         ]
         candidate = make_candidate()
         node = candidate.parsed.operations[0]
-
         report = validate_entailment_response(
             {
                 "calculation_id": "CALC_0001",
@@ -283,6 +509,11 @@ class EntailmentTests(unittest.TestCase):
                                 ),
                             }
                         ],
+                        "identifier_groundings": [
+                            grounding("total_value", 0, "total value"),
+                            grounding("item_count", 0, "item count"),
+                            grounding("result", 1, "result"),
+                        ],
                         "depends_on_node_ids": [],
                         "derivation_step": (
                             "Normalize the directly stated relationship "
@@ -295,13 +526,11 @@ class EntailmentTests(unittest.TestCase):
             candidate=candidate,
             segments=segments,
         )
-
         self.assertTrue(report.passed, report.issues)
 
     def test_derived_node_requires_dependency_or_evidence(self):
         candidate = make_candidate()
         node = candidate.parsed.operations[0]
-
         with self.assertRaisesRegex(
             EntailmentValidationError,
             "dependencies or evidence",
@@ -317,10 +546,9 @@ class EntailmentTests(unittest.TestCase):
                             "operation": node.operation,
                             "status": "derived",
                             "evidence": [],
+                            "identifier_groundings": [],
                             "depends_on_node_ids": [],
-                            "derivation_step": (
-                                "Derive the expression."
-                            ),
+                            "derivation_step": "Derive the expression.",
                         }
                     ],
                 },
@@ -335,6 +563,7 @@ class EntailmentTests(unittest.TestCase):
                     {"text": "That gives the result."},
                 ],
             )
+
 
 if __name__ == "__main__":
     unittest.main()

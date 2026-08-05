@@ -100,12 +100,59 @@ class EvidenceRange:
 
 
 @dataclass(frozen=True, slots=True)
+class IdentifierGrounding:
+    identifier: str
+    start_segment: int
+    end_segment: int
+    quote: str
+
+    @classmethod
+    def from_mapping(
+        cls,
+        raw: Mapping[str, Any],
+    ) -> "IdentifierGrounding":
+        required = {
+            "identifier",
+            "start_segment",
+            "end_segment",
+            "quote",
+        }
+        if set(raw) != required:
+            raise EntailmentValidationError(
+                "Identifier grounding must contain exactly "
+                f"{sorted(required)}"
+            )
+        start = _require_segment(raw["start_segment"], "start_segment")
+        end = _require_segment(raw["end_segment"], "end_segment")
+        if end < start:
+            raise EntailmentValidationError(
+                "Identifier grounding end_segment cannot precede "
+                "start_segment"
+            )
+        return cls(
+            identifier=_require_string(raw["identifier"], "identifier"),
+            start_segment=start,
+            end_segment=end,
+            quote=_require_string(raw["quote"], "quote"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "identifier": self.identifier,
+            "start_segment": self.start_segment,
+            "end_segment": self.end_segment,
+            "quote": self.quote,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class NodeEntailment:
     node_id: str
     expression: str
     operation: str
     status: NodeStatus
     evidence: tuple[EvidenceRange, ...]
+    identifier_groundings: tuple[IdentifierGrounding, ...]
     depends_on_node_ids: tuple[str, ...]
     derivation_step: str
 
@@ -117,6 +164,7 @@ class NodeEntailment:
             "operation",
             "status",
             "evidence",
+            "identifier_groundings",
             "depends_on_node_ids",
             "derivation_step",
         }
@@ -145,6 +193,29 @@ class NodeEntailment:
                     f"evidence[{index}] must be an object"
                 )
             evidence.append(EvidenceRange.from_mapping(item))
+
+        raw_groundings = raw["identifier_groundings"]
+        if isinstance(raw_groundings, (str, bytes)) or not isinstance(
+            raw_groundings, Sequence
+        ):
+            raise EntailmentValidationError(
+                "identifier_groundings must be an array"
+            )
+        groundings: list[IdentifierGrounding] = []
+        seen_grounding_identifiers: set[str] = set()
+        for index, item in enumerate(raw_groundings):
+            if not isinstance(item, Mapping):
+                raise EntailmentValidationError(
+                    f"identifier_groundings[{index}] must be an object"
+                )
+            grounding = IdentifierGrounding.from_mapping(item)
+            if grounding.identifier in seen_grounding_identifiers:
+                raise EntailmentValidationError(
+                    "Duplicate identifier grounding: "
+                    f"{grounding.identifier}"
+                )
+            seen_grounding_identifiers.add(grounding.identifier)
+            groundings.append(grounding)
 
         dependencies = _require_string_array(
             raw["depends_on_node_ids"], "depends_on_node_ids"
@@ -177,6 +248,7 @@ class NodeEntailment:
             operation=_require_string(raw["operation"], "operation"),
             status=status,
             evidence=tuple(evidence),
+            identifier_groundings=tuple(groundings),
             depends_on_node_ids=tuple(dependencies),
             derivation_step=derivation_step,
         )
@@ -188,6 +260,9 @@ class NodeEntailment:
             "operation": self.operation,
             "status": self.status.value,
             "evidence": [item.to_dict() for item in self.evidence],
+            "identifier_groundings": [
+                item.to_dict() for item in self.identifier_groundings
+            ],
             "depends_on_node_ids": list(self.depends_on_node_ids),
             "derivation_step": self.derivation_step,
         }
@@ -241,7 +316,18 @@ def build_entailment_prompt(
             {
                 "start_segment": item.start_segment,
                 "end_segment": item.end_segment,
-                "quote": "Exact quote from those segments",
+                "quote": "Exact quote establishing the operation",
+            }
+        ],
+        "identifier_groundings": [
+            {
+                "identifier": "identifier from this node",
+                "start_segment": item.start_segment,
+                "end_segment": item.end_segment,
+                "quote": (
+                    "Exact source phrase identifying this quantity; "
+                    "the phrase may differ from the normalized symbol"
+                ),
             }
         ],
         "depends_on_node_ids": [],
@@ -256,10 +342,18 @@ def build_entailment_prompt(
     return (
         "Validate every operation node in the proposed formula against the "
         "source. Use status entailed only when the transcript directly states "
-        "the operands and arithmetic relationship. Use status derived only "
-        "when the node follows algebraically from other validated nodes, and "
-        "list those dependencies. Quotes must be exact substrings of the cited "
-        "segment range. Do not use outside knowledge. Return JSON only.\n\n"
+        "the node expression in the same orientation. Use status derived when "
+        "the expression is an algebraic rearrangement of a source-stated "
+        "relationship or follows from earlier validated nodes. A directly "
+        "grounded derived node may have no dependencies, but it must include "
+        "operation evidence and a derivation step. For every identifier "
+        "introduced by the node, provide an identifier_grounding with an exact "
+        "source phrase that identifies the quantity. The source phrase may be "
+        "a paraphrase of the normalized symbol. Identifiers already supplied "
+        "by a dependency do not need repeated grounding. The final node must "
+        "also ground the formula's left-hand result symbol. All quotes must be "
+        "exact substrings of their cited segment ranges. Do not use outside "
+        "knowledge. Return JSON only.\n\n"
         f"CALCULATION EVENT:\n{json.dumps(item.to_dict(), indent=2)}\n\n"
         f"FORMULA CANDIDATE:\n{json.dumps(candidate.to_dict(), indent=2)}\n\n"
         f"PARSED OPERATION NODES:\n"
@@ -328,11 +422,15 @@ def validate_entailment_response(
     if extra:
         issues.append(f"Unknown node entailments: {sorted(extra)}")
 
-    variable_phrases = _variable_phrases(candidate)
     parsed_order = {
         node.node_id: index
         for index, node in enumerate(candidate.parsed.operations)
     }
+    root_node_id = (
+        candidate.parsed.operations[-1].node_id
+        if candidate.parsed.operations
+        else None
+    )
 
     for node_id in sorted(set(parsed_by_id) & set(provided_by_id)):
         parsed_node = parsed_by_id[node_id]
@@ -371,35 +469,73 @@ def validate_entailment_response(
             )
         )
 
+        dependency_identifiers: set[str] = set()
+        for dependency in record.depends_on_node_ids:
+            dependency_node = parsed_by_id.get(dependency)
+            if dependency_node is not None:
+                dependency_identifiers.update(
+                    _identifiers_in_expression(dependency_node.expression)
+                )
+
+        required_identifiers = (
+            _identifiers_in_expression(parsed_node.expression)
+            - dependency_identifiers
+        )
+        if node_id == root_node_id:
+            required_identifiers.add(candidate.parsed.left_symbol)
+
+        grounding_by_identifier = {
+            grounding.identifier: grounding
+            for grounding in record.identifier_groundings
+        }
+        unknown_groundings = (
+            set(grounding_by_identifier) - required_identifiers
+        )
+        if unknown_groundings:
+            issues.append(
+                f"{node_id} has groundings for unexpected identifiers: "
+                f"{sorted(unknown_groundings)}"
+            )
+
         if requires_direct_grounding:
             evidence_text = " ".join(combined_evidence)
             if not _has_operation_cue(record.operation, evidence_text):
                 issues.append(
                     f"{node_id} evidence lacks a cue for {record.operation}"
                 )
-            dependency_identifiers: set[str] = set()
-            for dependency in record.depends_on_node_ids:
-                dependency_node = parsed_by_id.get(dependency)
-                if dependency_node is not None:
-                    dependency_identifiers.update(
-                        _identifiers_in_expression(
-                            dependency_node.expression
-                        )
-                    )
-            for identifier in _identifiers_in_expression(
-                parsed_node.expression
+
+            missing_groundings = (
+                required_identifiers - set(grounding_by_identifier)
+            )
+            if missing_groundings:
+                issues.append(
+                    f"{node_id} lacks identifier groundings for: "
+                    f"{sorted(missing_groundings)}"
+                )
+
+        for grounding in record.identifier_groundings:
+            if (
+                grounding.start_segment < item.start_segment
+                or grounding.end_segment > item.end_segment
             ):
-                if identifier in dependency_identifiers:
-                    continue
-                phrases = variable_phrases.get(identifier, (identifier,))
-                if not any(
-                    _normalize(phrase) in _normalize(evidence_text)
-                    for phrase in phrases
-                    if phrase
-                ):
-                    issues.append(
-                        f"{node_id} evidence does not identify {identifier}"
-                    )
+                issues.append(
+                    f"{node_id} grounding for {grounding.identifier} "
+                    "falls outside inventory range"
+                )
+                continue
+            grounding_source = _range_text(
+                segments,
+                grounding.start_segment,
+                grounding.end_segment,
+            )
+            if _normalize(grounding.quote) not in _normalize(
+                grounding_source
+            ):
+                issues.append(
+                    f"{node_id} grounding quote for "
+                    f"{grounding.identifier} is not present in cited "
+                    "segments"
+                )
 
         for dependency in record.depends_on_node_ids:
             if dependency not in parsed_by_id:
@@ -446,21 +582,6 @@ def _range_text(
             )
         parts.append(text.strip())
     return " ".join(parts)
-
-
-def _variable_phrases(
-    candidate: FormulaCandidate,
-) -> dict[str, tuple[str, ...]]:
-    result: dict[str, tuple[str, ...]] = {}
-    for variable in candidate.variables:
-        symbol = str(variable["symbol"])
-        meaning = str(variable["meaning"])
-        result[symbol] = (
-            symbol,
-            symbol.replace("_", " "),
-            meaning,
-        )
-    return result
 
 
 def _identifiers_in_expression(expression: str) -> set[str]:
