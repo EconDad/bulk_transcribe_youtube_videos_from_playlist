@@ -359,3 +359,250 @@ def _require_string_array(
             result.append(normalized)
             seen.add(normalized)
     return result
+
+
+@dataclass(frozen=True, slots=True)
+class InventoryChunk:
+    """One bounded transcript window for inventory extraction."""
+
+    chunk_index: int
+    start_segment: int
+    end_segment: int
+    segments: tuple[Mapping[str, Any], ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "chunk_index": self.chunk_index,
+            "start_segment": self.start_segment,
+            "end_segment": self.end_segment,
+            "segment_count": len(self.segments),
+        }
+
+
+def build_inventory_chunks(
+    segments: Sequence[Mapping[str, Any]],
+    *,
+    chunk_segments: int = 40,
+    overlap_segments: int = 6,
+) -> tuple[InventoryChunk, ...]:
+    """Split a transcript into bounded, overlapping segment windows."""
+
+    if chunk_segments < 2:
+        raise InventoryValidationError(
+            "chunk_segments must be at least 2"
+        )
+    if overlap_segments < 0:
+        raise InventoryValidationError(
+            "overlap_segments cannot be negative"
+        )
+    if overlap_segments >= chunk_segments:
+        raise InventoryValidationError(
+            "overlap_segments must be smaller than chunk_segments"
+        )
+    if not segments:
+        return tuple()
+
+    chunks: list[InventoryChunk] = []
+    start = 0
+    chunk_index = 0
+    while start < len(segments):
+        stop = min(len(segments), start + chunk_segments)
+        selected = tuple(segments[start:stop])
+        chunks.append(
+            InventoryChunk(
+                chunk_index=chunk_index,
+                start_segment=start,
+                end_segment=stop - 1,
+                segments=selected,
+            )
+        )
+        if stop == len(segments):
+            break
+        start = stop - overlap_segments
+        chunk_index += 1
+    return tuple(chunks)
+
+
+def merge_inventories(
+    *,
+    video_id: str,
+    inventories: Sequence[CalculationInventory],
+) -> CalculationInventory:
+    """Merge overlapping chunk inventories and assign stable global IDs."""
+
+    candidates: list[CalculationItem] = []
+    for inventory in inventories:
+        if inventory.video_id != video_id:
+            raise InventoryValidationError(
+                "Cannot merge inventories for different videos"
+            )
+        candidates.extend(inventory.calculations)
+
+    candidates.sort(
+        key=lambda item: (
+            item.start_segment,
+            item.end_segment,
+            item.name.casefold(),
+        )
+    )
+
+    merged: list[CalculationItem] = []
+    for candidate in candidates:
+        match_index = next(
+            (
+                index
+                for index, existing in enumerate(merged)
+                if _same_calculation(existing, candidate)
+            ),
+            None,
+        )
+        if match_index is None:
+            merged.append(candidate)
+        else:
+            merged[match_index] = _merge_calculation_items(
+                merged[match_index],
+                candidate,
+            )
+
+    merged.sort(
+        key=lambda item: (
+            item.start_segment,
+            item.end_segment,
+            item.name.casefold(),
+        )
+    )
+    renumbered = tuple(
+        CalculationItem(
+            calculation_id=f"CALC_{index:04d}",
+            name=item.name,
+            source_mode=item.source_mode,
+            start_segment=item.start_segment,
+            end_segment=item.end_segment,
+            variables_mentioned=item.variables_mentioned,
+            operations_mentioned=item.operations_mentioned,
+            visual_equation_cue=item.visual_equation_cue,
+            formula_expected=item.formula_expected,
+            reason=item.reason,
+        )
+        for index, item in enumerate(merged, start=1)
+    )
+    return CalculationInventory(
+        schema_version="1.0",
+        video_id=video_id,
+        calculations=renumbered,
+    )
+
+
+def _same_calculation(
+    first: CalculationItem,
+    second: CalculationItem,
+) -> bool:
+    if first.end_segment < second.start_segment:
+        return False
+    if second.end_segment < first.start_segment:
+        return False
+
+    if first.visual_equation_cue and second.visual_equation_cue:
+        return True
+
+    first_name = _token_set(first.name)
+    second_name = _token_set(second.name)
+    name_similarity = _jaccard(first_name, second_name)
+    if name_similarity >= 0.67:
+        return True
+
+    first_variables = _normalized_set(first.variables_mentioned)
+    second_variables = _normalized_set(second.variables_mentioned)
+    first_operations = _normalized_set(first.operations_mentioned)
+    second_operations = _normalized_set(second.operations_mentioned)
+    variable_similarity = _jaccard(first_variables, second_variables)
+    operation_overlap = bool(first_operations & second_operations)
+    return (
+        name_similarity >= 0.30
+        and variable_similarity >= 0.50
+        and operation_overlap
+    )
+
+
+def _merge_calculation_items(
+    first: CalculationItem,
+    second: CalculationItem,
+) -> CalculationItem:
+    if first.source_mode is second.source_mode:
+        source_mode = first.source_mode
+    else:
+        source_mode = SourceMode.MIXED
+
+    reasons = []
+    for reason in (first.reason, second.reason):
+        if reason not in reasons:
+            reasons.append(reason)
+
+    return CalculationItem(
+        calculation_id=first.calculation_id,
+        name=(
+            first.name
+            if len(first.name) >= len(second.name)
+            else second.name
+        ),
+        source_mode=source_mode,
+        start_segment=min(first.start_segment, second.start_segment),
+        end_segment=max(first.end_segment, second.end_segment),
+        variables_mentioned=tuple(
+            _ordered_union(
+                first.variables_mentioned,
+                second.variables_mentioned,
+            )
+        ),
+        operations_mentioned=tuple(
+            _ordered_union(
+                first.operations_mentioned,
+                second.operations_mentioned,
+            )
+        ),
+        visual_equation_cue=(
+            first.visual_equation_cue
+            or second.visual_equation_cue
+        ),
+        formula_expected=(
+            first.formula_expected
+            or second.formula_expected
+        ),
+        reason=" ".join(reasons),
+    )
+
+
+def _token_set(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", value.casefold())
+        if len(token) > 1
+    }
+
+
+def _normalized_set(values: Sequence[str]) -> set[str]:
+    return {
+        " ".join(sorted(_token_set(value)))
+        for value in values
+        if value.strip()
+    }
+
+
+def _jaccard(first: set[str], second: set[str]) -> float:
+    if not first or not second:
+        return 0.0
+    return len(first & second) / len(first | second)
+
+
+def _ordered_union(
+    first: Sequence[str],
+    second: Sequence[str],
+) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in (*first, *second):
+        key = value.casefold().strip()
+        if key and key not in seen:
+            result.append(value)
+            seen.add(key)
+    return result

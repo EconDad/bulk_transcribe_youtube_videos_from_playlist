@@ -46,6 +46,8 @@ class ModelClientTests(unittest.TestCase):
         self.assertFalse(payload["stream"])
         self.assertTrue(payload["think"])
         self.assertEqual(payload["options"]["temperature"], 0)
+        self.assertEqual(payload["options"]["num_predict"], 1536)
+        self.assertEqual(payload["keep_alive"], "30m")
 
     def test_rejects_non_json_message_content(self):
         client = OllamaJsonClient(
@@ -60,6 +62,23 @@ class ModelClientTests(unittest.TestCase):
             client.complete_json(
                 system_prompt="System",
                 user_prompt="User",
+            )
+
+
+    def test_stage_is_included_in_transport_failure(self):
+        class FailingTransport:
+            def post_json(self, **kwargs):
+                raise ModelClientError("Model HTTP request failed: timed out")
+
+        client = OllamaJsonClient(transport=FailingTransport())
+        with self.assertRaisesRegex(
+            ModelClientError,
+            "inventory chunk 1/3 failed",
+        ):
+            client.complete_json(
+                system_prompt="System",
+                user_prompt="User",
+                stage="inventory chunk 1/3",
             )
 
 

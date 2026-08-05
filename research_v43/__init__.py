@@ -9,9 +9,12 @@ from .artifacts import (
 from .calculation_inventory import (
     CalculationInventory,
     CalculationItem,
+    InventoryChunk,
     InventoryValidationError,
     SourceMode,
+    build_inventory_chunks,
     build_inventory_prompt,
+    merge_inventories,
     parse_inventory_response,
 )
 from .coverage import (
@@ -69,6 +72,7 @@ __all__ = [
     "FormulaEntailmentReport",
     "FormulaExtractionError",
     "FormulaExtractionResult",
+    "InventoryChunk",
     "InventoryValidationError",
     "JsonModelResponse",
     "ModelClientError",
@@ -80,7 +84,9 @@ __all__ = [
     "SourceMode",
     "build_entailment_prompt",
     "build_formula_extraction_prompt",
+    "build_inventory_chunks",
     "build_inventory_prompt",
+    "merge_inventories",
     "parse_formula",
     "parse_formula_extraction_response",
     "parse_inventory_response",

@@ -1,9 +1,10 @@
-"""Minimal JSON-only model client for research pipeline v4.3."""
+"""Observable JSON-only model client for research pipeline v4.3."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import time
 from typing import Any, Mapping, Protocol
 from urllib import error, request
 
@@ -71,6 +72,10 @@ class ModelInvocation:
     num_ctx: int
     prompt_chars: int
     response_chars: int
+    stage: str = "model"
+    num_predict: int = 0
+    keep_alive: str = ""
+    elapsed_seconds: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +84,10 @@ class ModelInvocation:
             "num_ctx": self.num_ctx,
             "prompt_chars": self.prompt_chars,
             "response_chars": self.response_chars,
+            "stage": self.stage,
+            "num_predict": self.num_predict,
+            "keep_alive": self.keep_alive,
+            "elapsed_seconds": round(self.elapsed_seconds, 3),
         }
 
 
@@ -89,7 +98,7 @@ class JsonModelResponse:
 
 
 class OllamaJsonClient:
-    """JSON-only Ollama client with deterministic generation options."""
+    """JSON-only Ollama client with bounded, observable generation."""
 
     def __init__(
         self,
@@ -99,6 +108,8 @@ class OllamaJsonClient:
         think: bool = True,
         num_ctx: int = 8192,
         timeout_seconds: float = 300.0,
+        num_predict: int = 1536,
+        keep_alive: str = "30m",
         transport: JsonTransport | None = None,
     ) -> None:
         normalized_host = host.rstrip("/")
@@ -110,12 +121,18 @@ class OllamaJsonClient:
             raise ValueError("num_ctx must be at least 1024")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if num_predict < 64:
+            raise ValueError("num_predict must be at least 64")
+        if not keep_alive.strip():
+            raise ValueError("keep_alive cannot be empty")
 
         self.host = normalized_host
         self.model = model.strip()
         self.think = bool(think)
         self.num_ctx = int(num_ctx)
         self.timeout_seconds = float(timeout_seconds)
+        self.num_predict = int(num_predict)
+        self.keep_alive = keep_alive.strip()
         self.transport = transport or UrllibJsonTransport()
 
     def complete_json(
@@ -123,17 +140,30 @@ class OllamaJsonClient:
         *,
         system_prompt: str,
         user_prompt: str,
+        stage: str = "model",
+        num_predict: int | None = None,
+        think: bool | None = None,
     ) -> JsonModelResponse:
         if not system_prompt.strip():
             raise ValueError("system_prompt cannot be empty")
         if not user_prompt.strip():
             raise ValueError("user_prompt cannot be empty")
+        normalized_stage = stage.strip() or "model"
+        resolved_num_predict = (
+            self.num_predict
+            if num_predict is None
+            else int(num_predict)
+        )
+        if resolved_num_predict < 64:
+            raise ValueError("num_predict must be at least 64")
+        resolved_think = self.think if think is None else bool(think)
 
         request_payload = {
             "model": self.model,
             "stream": False,
             "format": "json",
-            "think": self.think,
+            "think": resolved_think,
+            "keep_alive": self.keep_alive,
             "messages": [
                 {"role": "system", "content": system_prompt.strip()},
                 {"role": "user", "content": user_prompt.strip()},
@@ -141,41 +171,56 @@ class OllamaJsonClient:
             "options": {
                 "temperature": 0,
                 "num_ctx": self.num_ctx,
+                "num_predict": resolved_num_predict,
             },
         }
 
-        response = self.transport.post_json(
-            url=f"{self.host}/api/chat",
-            payload=request_payload,
-            timeout_seconds=self.timeout_seconds,
-        )
+        started = time.monotonic()
+        try:
+            response = self.transport.post_json(
+                url=f"{self.host}/api/chat",
+                payload=request_payload,
+                timeout_seconds=self.timeout_seconds,
+            )
+        except ModelClientError as exc:
+            elapsed = time.monotonic() - started
+            raise ModelClientError(
+                f"{normalized_stage} failed after {elapsed:.1f}s: {exc}"
+            ) from exc
+        elapsed = time.monotonic() - started
 
         message = response.get("message")
         if not isinstance(message, Mapping):
-            raise ModelClientError("Ollama response is missing message")
+            raise ModelClientError(
+                f"{normalized_stage}: Ollama response is missing message"
+            )
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
             raise ModelClientError(
-                "Ollama response message content is empty"
+                f"{normalized_stage}: Ollama response message content is empty"
             )
 
         try:
             decoded_content = json.loads(content)
         except json.JSONDecodeError as exc:
             raise ModelClientError(
-                "Ollama message content is not valid JSON"
+                f"{normalized_stage}: Ollama message content is not valid JSON"
             ) from exc
         if not isinstance(decoded_content, Mapping):
             raise ModelClientError(
-                "Ollama JSON content must be an object"
+                f"{normalized_stage}: Ollama JSON content must be an object"
             )
 
         invocation = ModelInvocation(
             model=self.model,
-            think=self.think,
+            think=resolved_think,
             num_ctx=self.num_ctx,
             prompt_chars=len(system_prompt) + len(user_prompt),
             response_chars=len(content),
+            stage=normalized_stage,
+            num_predict=resolved_num_predict,
+            keep_alive=self.keep_alive,
+            elapsed_seconds=elapsed,
         )
         return JsonModelResponse(
             payload=dict(decoded_content),

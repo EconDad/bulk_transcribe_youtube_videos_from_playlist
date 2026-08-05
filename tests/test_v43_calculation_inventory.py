@@ -6,7 +6,9 @@ import unittest
 from research_v43.calculation_inventory import (
     CalculationInventory,
     InventoryValidationError,
+    build_inventory_chunks,
     build_inventory_prompt,
+    merge_inventories,
     parse_inventory_response,
 )
 
@@ -108,6 +110,54 @@ class CalculationInventoryTests(unittest.TestCase):
         self.assertIn("Do not invent textbook formulas", prompt)
         self.assertNotIn("coupon", prompt.lower())
         self.assertNotIn("yield to maturity", prompt.lower())
+
+
+    def test_builds_overlapping_inventory_chunks(self):
+        segments = [
+            {"segment_id": index, "text": f"Segment {index}"}
+            for index in range(9)
+        ]
+        chunks = build_inventory_chunks(
+            segments,
+            chunk_segments=4,
+            overlap_segments=1,
+        )
+        self.assertEqual(
+            [(item.start_segment, item.end_segment) for item in chunks],
+            [(0, 3), (3, 6), (6, 8)],
+        )
+
+    def test_merges_duplicate_overlap_events_and_renumbers(self):
+        first = CalculationInventory.from_mapping(
+            {
+                "schema_version": "1.0",
+                "video_id": "video-123",
+                "calculations": [inventory_payload()["calculations"][0]],
+            }
+        )
+        duplicate = inventory_payload()["calculations"][0].copy()
+        duplicate["calculation_id"] = "CALC_0007"
+        duplicate["start_segment"] = 3
+        duplicate["end_segment"] = 5
+        duplicate["name"] = "Normalize the measurement"
+        second = CalculationInventory.from_mapping(
+            {
+                "schema_version": "1.0",
+                "video_id": "video-123",
+                "calculations": [duplicate],
+            }
+        )
+        merged = merge_inventories(
+            video_id="video-123",
+            inventories=[first, second],
+        )
+        self.assertEqual(len(merged.calculations), 1)
+        self.assertEqual(
+            merged.calculations[0].calculation_id,
+            "CALC_0001",
+        )
+        self.assertEqual(merged.calculations[0].start_segment, 2)
+        self.assertEqual(merged.calculations[0].end_segment, 5)
 
 
 if __name__ == "__main__":

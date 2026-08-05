@@ -15,7 +15,7 @@ class FakeClient:
         self.payloads = list(payloads)
         self.calls = 0
 
-    def complete_json(self, *, system_prompt, user_prompt):
+    def complete_json(self, *, system_prompt, user_prompt, **kwargs):
         self.calls += 1
         if not self.payloads:
             raise AssertionError("Unexpected model call")
@@ -158,6 +158,7 @@ class RunnerTests(unittest.TestCase):
                 client=client,
                 raw_root=raw_root,
                 output_root=output_root,
+                progress_root=base / "Progress",
             )
 
             self.assertEqual(exit_code, 0)
@@ -202,6 +203,7 @@ class RunnerTests(unittest.TestCase):
                 client=client,
                 raw_root=raw_root,
                 output_root=base / "Diagnostics",
+                progress_root=base / "Progress",
             )
             self.assertEqual(exit_code, 2)
             self.assertEqual(client.calls, 1)
@@ -212,6 +214,55 @@ class RunnerTests(unittest.TestCase):
             )
             self.assertEqual(coverage["visual_review_required"], 1)
             self.assertFalse(coverage["passed"])
+
+
+    def test_chunked_inventory_resumes_without_model_calls(self):
+        empty_first = {
+            "schema_version": "1.0",
+            "video_id": "video-123",
+            "calculations": [],
+        }
+        empty_second = {
+            "schema_version": "1.0",
+            "video_id": "video-123",
+            "calculations": [],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            raw_root = base / "Raw Transcripts"
+            output_root = base / "Diagnostics"
+            progress_root = base / "Progress"
+            write_source(
+                raw_root,
+                "video-123",
+                [f"Conceptual segment {index}." for index in range(5)],
+            )
+            first_client = FakeClient([empty_first, empty_second])
+            exit_code, _ = run_pipeline(
+                video_id="video-123",
+                client=first_client,
+                raw_root=raw_root,
+                output_root=output_root,
+                progress_root=progress_root,
+                inventory_chunk_segments=3,
+                inventory_overlap_segments=1,
+            )
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(first_client.calls, 2)
+
+            second_client = FakeClient([])
+            exit_code, _ = run_pipeline(
+                video_id="video-123",
+                client=second_client,
+                raw_root=raw_root,
+                output_root=output_root,
+                progress_root=progress_root,
+                inventory_chunk_segments=3,
+                inventory_overlap_segments=1,
+            )
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(second_client.calls, 0)
 
 
 if __name__ == "__main__":
