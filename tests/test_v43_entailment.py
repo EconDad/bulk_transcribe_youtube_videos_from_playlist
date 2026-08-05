@@ -5,6 +5,7 @@ import unittest
 from research_v43.calculation_inventory import CalculationItem
 from research_v43.entailment import (
     EntailmentValidationError,
+    build_entailment_prompt,
     validate_entailment_response,
 )
 from research_v43.expression_ast import FormulaCandidate
@@ -564,6 +565,220 @@ class EntailmentTests(unittest.TestCase):
                 ],
             )
 
+
+
+    def test_prompt_lists_root_result_identifier_explicitly(self):
+        sentence = (
+            "The observed amount is 7, which is 3 fewer than "
+            "the reference amount."
+        )
+        item = CalculationItem.from_mapping(
+            {
+                "calculation_id": "CALC_0001",
+                "name": "Difference example",
+                "source_mode": "spoken",
+                "start_segment": 0,
+                "end_segment": 0,
+                "variables_mentioned": [
+                    "observed amount",
+                    "reference amount",
+                    "3",
+                ],
+                "operations_mentioned": ["subtraction"],
+                "visual_equation_cue": False,
+                "formula_expected": True,
+                "reason": (
+                    "The source states a fewer-than relationship."
+                ),
+            }
+        )
+        candidate = FormulaCandidate.from_mapping(
+            {
+                "calculation_id": "CALC_0001",
+                "formula_id": "amount_difference",
+                "name": "Amount difference",
+                "ascii": (
+                    "difference = "
+                    "reference_amount - observed_amount"
+                ),
+                "latex": "d = r - o",
+                "derivation_type": "derived",
+                "variables": [
+                    {
+                        "symbol": "difference",
+                        "meaning": "difference between the values",
+                        "unit": "units",
+                    },
+                    {
+                        "symbol": "reference_amount",
+                        "meaning": "reference amount",
+                        "unit": "units",
+                    },
+                    {
+                        "symbol": "observed_amount",
+                        "meaning": "observed amount",
+                        "unit": "units",
+                    },
+                ],
+                "derivation_steps": [
+                    (
+                        "Rearrange the source-stated relationship "
+                        "to solve for the difference."
+                    )
+                ],
+                "source_claims": [
+                    {
+                        "start_segment": 0,
+                        "end_segment": 0,
+                        "relationship": (
+                            "observed_amount = "
+                            "reference_amount - difference"
+                        ),
+                    }
+                ],
+            }
+        )
+
+        prompt = build_entailment_prompt(
+            item=item,
+            candidate=candidate,
+            segments=[{"text": sentence}],
+        )
+
+        self.assertIn(
+            '"left_hand_result_identifier": "difference"',
+            prompt,
+        )
+        self.assertIn(
+            '"required_identifier_groundings"',
+            prompt,
+        )
+        self.assertIn('"difference"', prompt)
+        self.assertIn("spoken result amount", prompt)
+        self.assertIn("3 fewer than", prompt)
+
+    def test_result_can_be_grounded_by_fewer_than_phrase(self):
+        sentence = (
+            "The observed amount is 7, which is 3 fewer than "
+            "the reference amount."
+        )
+        item = CalculationItem.from_mapping(
+            {
+                "calculation_id": "CALC_0001",
+                "name": "Difference example",
+                "source_mode": "spoken",
+                "start_segment": 0,
+                "end_segment": 0,
+                "variables_mentioned": [
+                    "observed amount",
+                    "reference amount",
+                    "3",
+                ],
+                "operations_mentioned": ["subtraction"],
+                "visual_equation_cue": False,
+                "formula_expected": True,
+                "reason": (
+                    "The source states a fewer-than relationship."
+                ),
+            }
+        )
+        candidate = FormulaCandidate.from_mapping(
+            {
+                "calculation_id": "CALC_0001",
+                "formula_id": "amount_difference",
+                "name": "Amount difference",
+                "ascii": (
+                    "difference = "
+                    "reference_amount - observed_amount"
+                ),
+                "latex": "d = r - o",
+                "derivation_type": "derived",
+                "variables": [
+                    {
+                        "symbol": "difference",
+                        "meaning": "difference between the values",
+                        "unit": "units",
+                    },
+                    {
+                        "symbol": "reference_amount",
+                        "meaning": "reference amount",
+                        "unit": "units",
+                    },
+                    {
+                        "symbol": "observed_amount",
+                        "meaning": "observed amount",
+                        "unit": "units",
+                    },
+                ],
+                "derivation_steps": [
+                    (
+                        "Rearrange observed_amount = "
+                        "reference_amount - difference."
+                    )
+                ],
+                "source_claims": [
+                    {
+                        "start_segment": 0,
+                        "end_segment": 0,
+                        "relationship": (
+                            "observed_amount = "
+                            "reference_amount - difference"
+                        ),
+                    }
+                ],
+            }
+        )
+        node = candidate.parsed.operations[0]
+
+        report = validate_entailment_response(
+            {
+                "calculation_id": "CALC_0001",
+                "formula_id": "amount_difference",
+                "nodes": [
+                    {
+                        "node_id": node.node_id,
+                        "expression": node.expression,
+                        "operation": node.operation,
+                        "status": "derived",
+                        "evidence": [
+                            {
+                                "start_segment": 0,
+                                "end_segment": 0,
+                                "quote": sentence,
+                            }
+                        ],
+                        "identifier_groundings": [
+                            grounding(
+                                "reference_amount",
+                                0,
+                                "reference amount",
+                            ),
+                            grounding(
+                                "observed_amount",
+                                0,
+                                "observed amount",
+                            ),
+                            grounding(
+                                "difference",
+                                0,
+                                "3 fewer than",
+                            ),
+                        ],
+                        "depends_on_node_ids": [],
+                        "derivation_step": (
+                            "Rearrange observed_amount = "
+                            "reference_amount - difference "
+                            "to solve for difference."
+                        ),
+                    }
+                ],
+            },
+            item=item,
+            candidate=candidate,
+            segments=[{"text": sentence}],
+        )
+
+        self.assertTrue(report.passed, report.issues)
 
 if __name__ == "__main__":
     unittest.main()

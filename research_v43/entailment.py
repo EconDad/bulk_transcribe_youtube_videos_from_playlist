@@ -30,6 +30,7 @@ _OPERATION_CUES: dict[str, tuple[str, ...]] = {
         "minus",
         "difference",
         "less",
+        "fewer",
         "deduct",
     ),
     "multiplication": (
@@ -307,6 +308,48 @@ def build_entailment_prompt(
             )
         selected.append({"segment_id": index, "text": text.strip()})
 
+    root_node_id = (
+        candidate.parsed.operations[-1].node_id
+        if candidate.parsed.operations
+        else None
+    )
+    grounding_plan: list[dict[str, Any]] = []
+
+    for node in candidate.parsed.operations:
+        required_identifiers = sorted(
+            _identifiers_in_expression(node.expression)
+        )
+        left_hand_result_identifier = None
+
+        if node.node_id == root_node_id:
+            left_hand_result_identifier = candidate.parsed.left_symbol
+            if (
+                candidate.parsed.left_symbol
+                not in required_identifiers
+            ):
+                required_identifiers.append(
+                    candidate.parsed.left_symbol
+                )
+                required_identifiers.sort()
+
+        grounding_plan.append(
+            {
+                "node_id": node.node_id,
+                "required_identifier_groundings": (
+                    required_identifiers
+                ),
+                "left_hand_result_identifier": (
+                    left_hand_result_identifier
+                ),
+                "dependency_rule": (
+                    "A right-hand identifier may be omitted only when "
+                    "an explicitly listed earlier dependency supplies it. "
+                    "The root left-hand result identifier is always "
+                    "mandatory."
+                ),
+            }
+        )
+
     node_schema = {
         "node_id": "NODE_0001",
         "expression": "Canonical node expression",
@@ -321,7 +364,9 @@ def build_entailment_prompt(
         ],
         "identifier_groundings": [
             {
-                "identifier": "identifier from this node",
+                "identifier": (
+                    "one identifier listed in the required grounding plan"
+                ),
                 "start_segment": item.start_segment,
                 "end_segment": item.end_segment,
                 "quote": (
@@ -346,18 +391,26 @@ def build_entailment_prompt(
         "the expression is an algebraic rearrangement of a source-stated "
         "relationship or follows from earlier validated nodes. A directly "
         "grounded derived node may have no dependencies, but it must include "
-        "operation evidence and a derivation step. For every identifier "
-        "introduced by the node, provide an identifier_grounding with an exact "
-        "source phrase that identifies the quantity. The source phrase may be "
-        "a paraphrase of the normalized symbol. Identifiers already supplied "
-        "by a dependency do not need repeated grounding. The final node must "
-        "also ground the formula's left-hand result symbol. All quotes must be "
-        "exact substrings of their cited segment ranges. Do not use outside "
+        "operation evidence and a derivation step. Follow the REQUIRED "
+        "IDENTIFIER GROUNDING PLAN exactly. For every listed identifier, "
+        "provide one identifier_grounding with an exact source phrase that "
+        "identifies or quantifies that value. A right-hand identifier may be "
+        "omitted only when an explicitly listed earlier dependency supplies "
+        "it. The root node's left_hand_result_identifier is mandatory even "
+        "when it does not appear in the node expression. Ground that result "
+        "with an exact spoken result amount or relationship phrase, such as "
+        "'3 fewer than', when that phrase identifies or quantifies the "
+        "result. Do not omit an identifier merely because it appears to the "
+        "left of the equals sign. The source phrase may differ from the "
+        "normalized symbol. All quotes must be exact substrings of their "
+        "cited segment ranges. Do not use outside "
         "knowledge. Return JSON only.\n\n"
         f"CALCULATION EVENT:\n{json.dumps(item.to_dict(), indent=2)}\n\n"
         f"FORMULA CANDIDATE:\n{json.dumps(candidate.to_dict(), indent=2)}\n\n"
         f"PARSED OPERATION NODES:\n"
         f"{json.dumps([node.to_dict() for node in candidate.parsed.operations], indent=2)}\n\n"
+        f"REQUIRED IDENTIFIER GROUNDING PLAN:\n"
+        f"{json.dumps(grounding_plan, indent=2)}\n\n"
         f"RESPONSE SCHEMA:\n{json.dumps(response_schema, indent=2)}\n\n"
         f"SOURCE SEGMENTS:\n{json.dumps(selected, indent=2)}"
     )
