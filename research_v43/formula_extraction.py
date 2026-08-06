@@ -22,6 +22,21 @@ class ExtractionDisposition(StrEnum):
     VISUAL_REVIEW_REQUIRED = "visual_review_required"
 
 
+def allowed_extraction_dispositions(
+    item: CalculationItem,
+) -> tuple[ExtractionDisposition, ...]:
+    """Return only dispositions permitted by the inventory item."""
+
+    allowed = [
+        ExtractionDisposition.CANDIDATES_PROPOSED,
+        ExtractionDisposition.NON_SYMBOLIC_CALCULATION,
+        ExtractionDisposition.INSUFFICIENT_SOURCE_DETAIL,
+    ]
+    if item.visual_equation_cue:
+        allowed.append(ExtractionDisposition.VISUAL_REVIEW_REQUIRED)
+    return tuple(allowed)
+
+
 @dataclass(frozen=True, slots=True)
 class FormulaExtractionResult:
     calculation_id: str
@@ -63,12 +78,14 @@ def build_formula_extraction_prompt(
             )
         selected.append({"segment_id": index, "text": text.strip()})
 
+    allowed_dispositions = allowed_extraction_dispositions(item)
+    allowed_values = " | ".join(
+        disposition.value for disposition in allowed_dispositions
+    )
+
     response_schema = {
         "calculation_id": item.calculation_id,
-        "disposition": (
-            "candidates_proposed | non_symbolic_calculation | "
-            "insufficient_source_detail | visual_review_required"
-        ),
+        "disposition": allowed_values,
         "reason": "Source-grounded explanation.",
         "candidates": [
             {
@@ -103,12 +120,41 @@ def build_formula_extraction_prompt(
         "calculation event. Use only the supplied transcript segments. "
         "Do not inject a textbook formula that is absent from the source. "
         "A derived formula is allowed only when each derivation step follows "
-        "from source-stated relationships. If the source announces an equation "
-        "but does not verbalize it, choose visual_review_required. Return JSON "
+        "from source-stated relationships. The only allowed dispositions for "
+        "this item are listed in the response schema. Choose "
+        "visual_review_required only when it is explicitly listed. For every "
+        "candidate, parse the ASCII formula mentally and provide exactly one "
+        "variable definition for every snake_case identifier appearing anywhere "
+        "in that formula, including the identifier to the left of '='. Do not "
+        "define identifiers that do not appear in the ASCII formula. Return JSON "
         "only and match the schema exactly.\n\n"
         f"CALCULATION EVENT:\n{json.dumps(item_payload, indent=2)}\n\n"
         f"RESPONSE SCHEMA:\n{json.dumps(response_schema, indent=2)}\n\n"
         f"SOURCE SEGMENTS:\n{json.dumps(selected, indent=2)}"
+    )
+
+
+def build_formula_extraction_repair_prompt(
+    *,
+    item: CalculationItem,
+    segments: Sequence[Mapping[str, Any]],
+    invalid_payload: Mapping[str, Any],
+    validation_error: str,
+) -> str:
+    """Build one bounded structural-repair request."""
+
+    return (
+        build_formula_extraction_prompt(item=item, segments=segments)
+        + "\n\nREPAIR REQUEST:\n"
+        + "The previous JSON failed deterministic validation. Correct only the "
+        + "reported structural or schema defects. Preserve all source-bounded "
+        + "claims that remain valid. Do not add outside formulas, quantities, "
+        + "or relationships. Every ASCII identifier, including the left-hand "
+        + "result, must have exactly one variable definition, with no extras. "
+        + "Return a complete replacement JSON object only.\n\n"
+        + f"VALIDATION ERROR:\n{validation_error}\n\n"
+        + "INVALID RESPONSE:\n"
+        + json.dumps(dict(invalid_payload), indent=2)
     )
 
 
@@ -142,6 +188,20 @@ def parse_formula_extraction_response(
         raise FormulaExtractionError(
             "Unknown formula extraction disposition"
         ) from exc
+
+    allowed = allowed_extraction_dispositions(item)
+    if (
+        disposition is ExtractionDisposition.VISUAL_REVIEW_REQUIRED
+        and not item.visual_equation_cue
+    ):
+        raise FormulaExtractionError(
+            "visual_review_required requires a visual equation cue"
+        )
+    if disposition not in allowed:
+        raise FormulaExtractionError(
+            f"{disposition.value} is not allowed for this inventory item; "
+            f"allowed={[entry.value for entry in allowed]}"
+        )
 
     reason = _require_string(payload["reason"], "reason")
     raw_candidates = payload["candidates"]

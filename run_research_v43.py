@@ -31,11 +31,14 @@ from research_v43.entailment import (
     FormulaEntailmentReport,
     NodeStatus,
     build_entailment_prompt,
+    build_entailment_repair_prompt,
     validate_entailment_response,
 )
 from research_v43.formula_extraction import (
     ExtractionDisposition,
+    FormulaExtractionResult,
     build_formula_extraction_prompt,
+    build_formula_extraction_repair_prompt,
     parse_formula_extraction_response,
 )
 from research_v43.expression_ast import (
@@ -46,8 +49,9 @@ from research_v43.model_client import ModelClientError, OllamaJsonClient
 
 
 PROMPT_VERSION = "phase4-qwen3-v4.3-stage-cd.1"
-ENTAILMENT_PROMPT_VERSION = "phase4-qwen3-v4.3-entailment-cd.3.2"
-PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.3.2"
+EXTRACTION_PROMPT_VERSION = "phase4-qwen3-v4.3-extraction-cd.4a"
+ENTAILMENT_PROMPT_VERSION = "phase4-qwen3-v4.3-entailment-cd.4a"
+PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.4a"
 ENTAILMENT_INFERENCE_MODE = "direct-json-no-thinking-v1"
 INVENTORY_SYSTEM_PROMPT = (
     "You identify source-grounded calculation events. Return strict JSON. "
@@ -386,6 +390,187 @@ def _checkpointed_model_call(
     return response.payload
 
 
+def _extract_with_one_repair(
+    *,
+    item: Any,
+    segments: Sequence[Mapping[str, Any]],
+    client: Any,
+    checkpoint: Path,
+    expected: Mapping[str, Any],
+    resume: bool,
+    num_predict: int,
+    invocations: list[dict[str, Any]],
+) -> tuple[
+    FormulaExtractionResult | None,
+    Mapping[str, Any],
+    str | None,
+]:
+    stage = f"formula_extraction {item.calculation_id}"
+    payload = _checkpointed_model_call(
+        client=client,
+        system_prompt=EXTRACTION_SYSTEM_PROMPT,
+        user_prompt=build_formula_extraction_prompt(
+            item=item,
+            segments=segments,
+        ),
+        stage=stage,
+        checkpoint=checkpoint,
+        expected=expected,
+        resume=resume,
+        num_predict=num_predict,
+        invocations=invocations,
+        think=True,
+    )
+
+    try:
+        return (
+            parse_formula_extraction_response(payload, item=item),
+            payload,
+            None,
+        )
+    except Exception as first_error:
+        checkpoint.unlink(missing_ok=True)
+        first_reason = f"{type(first_error).__name__}: {first_error}"
+        repair_stage = f"formula_extraction_repair {item.calculation_id}"
+        _log(f"RETRY {repair_stage}; validation_error={first_reason}")
+        repaired_payload = _checkpointed_model_call(
+            client=client,
+            system_prompt=EXTRACTION_SYSTEM_PROMPT,
+            user_prompt=build_formula_extraction_repair_prompt(
+                item=item,
+                segments=segments,
+                invalid_payload=payload,
+                validation_error=first_reason,
+            ),
+            stage=repair_stage,
+            checkpoint=checkpoint,
+            expected=expected,
+            resume=False,
+            num_predict=max(num_predict, 2048),
+            invocations=invocations,
+            think=False,
+        )
+
+        try:
+            return (
+                parse_formula_extraction_response(
+                    repaired_payload,
+                    item=item,
+                ),
+                repaired_payload,
+                None,
+            )
+        except Exception as repair_error:
+            checkpoint.unlink(missing_ok=True)
+            reason = (
+                f"initial={first_reason}; "
+                f"repair={type(repair_error).__name__}: {repair_error}"
+            )
+            return None, repaired_payload, reason
+
+
+def _entail_with_one_repair(
+    *,
+    item: Any,
+    candidate: FormulaCandidate,
+    segments: Sequence[Mapping[str, Any]],
+    client: Any,
+    checkpoint: Path,
+    expected: Mapping[str, Any],
+    resume: bool,
+    num_predict: int,
+    invocations: list[dict[str, Any]],
+) -> tuple[
+    FormulaEntailmentReport | None,
+    Mapping[str, Any],
+    str | None,
+]:
+    stage = (
+        f"formula_entailment {item.calculation_id}/"
+        f"{candidate.formula_id}"
+    )
+    payload = _checkpointed_model_call(
+        client=client,
+        system_prompt=ENTAILMENT_SYSTEM_PROMPT,
+        user_prompt=build_entailment_prompt(
+            item=item,
+            candidate=candidate,
+            segments=segments,
+        ),
+        stage=stage,
+        checkpoint=checkpoint,
+        expected=expected,
+        resume=resume,
+        num_predict=num_predict,
+        invocations=invocations,
+        think=False,
+    )
+
+    validation_issues: list[str]
+    try:
+        report = validate_entailment_response(
+            payload,
+            item=item,
+            candidate=candidate,
+            segments=segments,
+        )
+        validation_issues = [
+            issue
+            for issue in report.issues
+            if (
+                "expression does not match AST" in issue
+                or "operation does not match AST" in issue
+            )
+        ]
+        if not validation_issues:
+            return report, payload, None
+    except Exception as first_error:
+        checkpoint.unlink(missing_ok=True)
+        reason = f"{type(first_error).__name__}: {first_error}"
+        return None, payload, reason
+
+    checkpoint.unlink(missing_ok=True)
+    repair_stage = (
+        f"formula_entailment_repair {item.calculation_id}/"
+        f"{candidate.formula_id}"
+    )
+    _log(
+        f"RETRY {repair_stage}; "
+        f"validation_issues={validation_issues}"
+    )
+    repaired_payload = _checkpointed_model_call(
+        client=client,
+        system_prompt=ENTAILMENT_SYSTEM_PROMPT,
+        user_prompt=build_entailment_repair_prompt(
+            item=item,
+            candidate=candidate,
+            segments=segments,
+            invalid_payload=payload,
+            validation_issues=validation_issues,
+        ),
+        stage=repair_stage,
+        checkpoint=checkpoint,
+        expected=expected,
+        resume=False,
+        num_predict=max(num_predict, 2048),
+        invocations=invocations,
+        think=False,
+    )
+
+    try:
+        repaired_report = validate_entailment_response(
+            repaired_payload,
+            item=item,
+            candidate=candidate,
+            segments=segments,
+        )
+        return repaired_report, repaired_payload, None
+    except Exception as repair_error:
+        checkpoint.unlink(missing_ok=True)
+        reason = f"{type(repair_error).__name__}: {repair_error}"
+        return None, repaired_payload, reason
+
+
 def _normalize_derivation_classification(
     candidate: FormulaCandidate,
     report: FormulaEntailmentReport,
@@ -446,6 +631,20 @@ def run_pipeline(
     resolutions: list[dict[str, Any]] = []
 
     for item in inventory.calculations:
+        if not item.formula_expected and not item.visual_equation_cue:
+            resolutions.append(
+                {
+                    "calculation_id": item.calculation_id,
+                    "state": "non_symbolic_calculation",
+                    "formula_ids": [],
+                    "reason": (
+                        "Inventory marked this event as not requiring a "
+                        "reusable symbolic formula."
+                    ),
+                }
+            )
+            continue
+
         if item.source_mode is SourceMode.VISUAL_CUE:
             resolutions.append(
                 {
@@ -453,7 +652,7 @@ def run_pipeline(
                     "state": "visual_review_required",
                     "formula_ids": [],
                     "reason": (
-                        "The source announces a visual equation; Stage C-D.3.2 "
+                        "The source announces a visual equation; Stage C-D.4A "
                         "does not yet perform frame recovery."
                     ),
                 }
@@ -468,39 +667,31 @@ def run_pipeline(
             / "extraction"
             / f"{item.calculation_id}.json"
         )
-        extraction_payload = _checkpointed_model_call(
-            client=client,
-            system_prompt=EXTRACTION_SYSTEM_PROMPT,
-            user_prompt=build_formula_extraction_prompt(
+        extraction_expected = {
+            "schema_version": "1.0",
+            "video_id": video_id,
+            "source_package_sha256": source_sha,
+            "prompt_version": EXTRACTION_PROMPT_VERSION,
+            "stage": "formula_extraction",
+            "calculation_id": item.calculation_id,
+            "calculation_sha256": item_sha,
+        }
+        extraction, extraction_payload, extraction_error = (
+            _extract_with_one_repair(
                 item=item,
                 segments=segments,
-            ),
-            stage=extraction_stage,
-            checkpoint=extraction_checkpoint,
-            expected={
-                "schema_version": "1.0",
-                "video_id": video_id,
-                "source_package_sha256": source_sha,
-                "prompt_version": PROMPT_VERSION,
-                "stage": "formula_extraction",
-                "calculation_id": item.calculation_id,
-                "calculation_sha256": item_sha,
-            },
-            resume=resume,
-            num_predict=detail_num_predict,
-            invocations=invocations,
-            think=True,
-        )
-        try:
-            extraction = parse_formula_extraction_response(
-                extraction_payload,
-                item=item,
+                client=client,
+                checkpoint=extraction_checkpoint,
+                expected=extraction_expected,
+                resume=resume,
+                num_predict=detail_num_predict,
+                invocations=invocations,
             )
-        except Exception as exc:
-            extraction_checkpoint.unlink(missing_ok=True)
+        )
+        if extraction is None:
             reason = (
-                "Invalid formula extraction response: "
-                f"{type(exc).__name__}: {exc}"
+                "Invalid formula extraction response after one repair: "
+                f"{extraction_error}"
             )
             _log(
                 f"REJECT formula_extraction "
@@ -559,44 +750,34 @@ def run_pipeline(
                 / item.calculation_id
                 / f"{candidate.formula_id}.json"
             )
-            entailment_payload = _checkpointed_model_call(
-                client=client,
-                system_prompt=ENTAILMENT_SYSTEM_PROMPT,
-                user_prompt=build_entailment_prompt(
+            entailment_expected = {
+                "schema_version": "1.0",
+                "video_id": video_id,
+                "source_package_sha256": source_sha,
+                "prompt_version": ENTAILMENT_PROMPT_VERSION,
+                "stage": "formula_entailment",
+                "calculation_id": item.calculation_id,
+                "formula_id": candidate.formula_id,
+                "candidate_sha256": candidate_sha,
+                "inference_mode": ENTAILMENT_INFERENCE_MODE,
+            }
+            report, entailment_payload, entailment_error = (
+                _entail_with_one_repair(
                     item=item,
                     candidate=candidate,
                     segments=segments,
-                ),
-                stage=entailment_stage,
-                checkpoint=entailment_checkpoint,
-                expected={
-                    "schema_version": "1.0",
-                    "video_id": video_id,
-                    "source_package_sha256": source_sha,
-                    "prompt_version": ENTAILMENT_PROMPT_VERSION,
-                    "stage": "formula_entailment",
-                    "calculation_id": item.calculation_id,
-                    "formula_id": candidate.formula_id,
-                    "candidate_sha256": candidate_sha,
-                    "inference_mode": ENTAILMENT_INFERENCE_MODE,
-                },
-                resume=resume,
-                num_predict=detail_num_predict,
-                invocations=invocations,
-                think=False,
-            )
-            try:
-                report = validate_entailment_response(
-                    entailment_payload,
-                    item=item,
-                    candidate=candidate,
-                    segments=segments,
+                    client=client,
+                    checkpoint=entailment_checkpoint,
+                    expected=entailment_expected,
+                    resume=resume,
+                    num_predict=detail_num_predict,
+                    invocations=invocations,
                 )
-            except Exception as exc:
-                entailment_checkpoint.unlink(missing_ok=True)
+            )
+            if report is None:
                 reason = (
-                    "Invalid entailment response: "
-                    f"{type(exc).__name__}: {exc}"
+                    "Invalid entailment response after one repair: "
+                    f"{entailment_error}"
                 )
                 _log(
                     f"REJECT {entailment_stage}: {reason}"
@@ -721,7 +902,7 @@ def run_pipeline(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run isolated research pipeline v4.3 Stage C-D.3.2 diagnostics."
+            "Run isolated research pipeline v4.3 Stage C-D.4A diagnostics."
         )
     )
     parser.add_argument("video_id")

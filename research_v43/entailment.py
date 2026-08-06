@@ -350,43 +350,54 @@ def build_entailment_prompt(
             }
         )
 
-    node_schema = {
-        "node_id": "NODE_0001",
-        "expression": "Canonical node expression",
-        "operation": "Operation copied from parsed formula",
-        "status": "entailed | derived",
-        "evidence": [
+    response_nodes: list[dict[str, Any]] = []
+    for node in candidate.parsed.operations:
+        response_nodes.append(
             {
-                "start_segment": item.start_segment,
-                "end_segment": item.end_segment,
-                "quote": "Exact quote establishing the operation",
-            }
-        ],
-        "identifier_groundings": [
-            {
-                "identifier": (
-                    "one identifier listed in the required grounding plan"
+                "node_id": node.node_id,
+                "expression": node.expression,
+                "operation": node.operation,
+                "status": "entailed | derived",
+                "evidence": [
+                    {
+                        "start_segment": item.start_segment,
+                        "end_segment": item.end_segment,
+                        "quote": "Exact quote establishing the operation",
+                    }
+                ],
+                "identifier_groundings": [
+                    {
+                        "identifier": (
+                            "one identifier listed in the required "
+                            "grounding plan"
+                        ),
+                        "start_segment": item.start_segment,
+                        "end_segment": item.end_segment,
+                        "quote": (
+                            "Exact source phrase identifying this quantity; "
+                            "the phrase may differ from the normalized symbol"
+                        ),
+                    }
+                ],
+                "depends_on_node_ids": [],
+                "derivation_step": (
+                    "Empty for entailed; required for derived."
                 ),
-                "start_segment": item.start_segment,
-                "end_segment": item.end_segment,
-                "quote": (
-                    "Exact source phrase identifying this quantity; "
-                    "the phrase may differ from the normalized symbol"
-                ),
             }
-        ],
-        "depends_on_node_ids": [],
-        "derivation_step": "Empty for entailed; required for derived.",
-    }
+        )
+
     response_schema = {
         "calculation_id": item.calculation_id,
         "formula_id": candidate.formula_id,
-        "nodes": [node_schema],
+        "nodes": response_nodes,
     }
 
     return (
         "Validate every operation node in the proposed formula against the "
-        "source. Use status entailed only when the transcript directly states "
+        "source. The response schema contains one immutable template per AST "
+        "node. Copy node_id, expression, and operation exactly; never add the "
+        "formula's left-hand assignment to a node expression. Use status "
+        "entailed only when the transcript directly states "
         "the node expression in the same orientation. Use status derived when "
         "the expression is an algebraic rearrangement of a source-stated "
         "relationship or follows from earlier validated nodes. A directly "
@@ -413,6 +424,35 @@ def build_entailment_prompt(
         f"{json.dumps(grounding_plan, indent=2)}\n\n"
         f"RESPONSE SCHEMA:\n{json.dumps(response_schema, indent=2)}\n\n"
         f"SOURCE SEGMENTS:\n{json.dumps(selected, indent=2)}"
+    )
+
+
+def build_entailment_repair_prompt(
+    *,
+    item: CalculationItem,
+    candidate: FormulaCandidate,
+    segments: Sequence[Mapping[str, Any]],
+    invalid_payload: Mapping[str, Any],
+    validation_issues: Sequence[str],
+) -> str:
+    """Build one bounded correction request for altered AST fields."""
+
+    return (
+        build_entailment_prompt(
+            item=item,
+            candidate=candidate,
+            segments=segments,
+        )
+        + "\n\nREPAIR REQUEST:\n"
+        + "The previous JSON altered immutable AST fields or failed structural "
+        + "validation. Return a complete replacement object. Copy every "
+        + "node_id, expression, and operation exactly from the response schema. "
+        + "Do not include a left-hand assignment in node.expression. Correct "
+        + "only the listed defects and remain within the supplied transcript.\n\n"
+        + "VALIDATION ISSUES:\n"
+        + json.dumps(list(validation_issues), indent=2)
+        + "\n\nINVALID RESPONSE:\n"
+        + json.dumps(dict(invalid_payload), indent=2)
     )
 
 
@@ -542,7 +582,7 @@ def validate_entailment_response(
             for grounding in record.identifier_groundings
         }
         unknown_groundings = (
-            set(grounding_by_identifier) - required_identifiers
+            set(grounding_by_identifier) - candidate.parsed.identifiers
         )
         if unknown_groundings:
             issues.append(
