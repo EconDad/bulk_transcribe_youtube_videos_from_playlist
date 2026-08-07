@@ -11,6 +11,27 @@ from typing import Any, Mapping, Sequence
 
 _CALCULATION_ID_RE = re.compile(r"^CALC_[0-9]{4}$")
 
+_VISUAL_EQUATION_CUE_PATTERNS = (
+    re.compile(
+        r"\bhere(?:'s| is)\s+(?:the|an?|this)\s+(?:equation|formula)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:equation|formula)\s+(?:is\s+)?(?:shown|displayed)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:look|looking)\s+at\s+(?:the|this|an?)\s+"
+        r"(?:equation|formula)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:equation|formula)\s+(?:on|shown\s+on)\s+"
+        r"(?:the\s+)?screen\b",
+        re.IGNORECASE,
+    ),
+)
+
 
 class InventoryValidationError(ValueError):
     """Raised when an inventory or model response is invalid."""
@@ -209,6 +230,105 @@ class CalculationInventory:
                 for item in self.calculations
             ],
         }
+
+
+def has_visual_equation_cue(text: str) -> bool:
+    """Detect direct transcript announcements of a displayed equation."""
+
+    if not isinstance(text, str):
+        raise InventoryValidationError(
+            "visual-equation cue text must be a string"
+        )
+    return any(
+        pattern.search(text) is not None
+        for pattern in _VISUAL_EQUATION_CUE_PATTERNS
+    )
+
+
+def audit_visual_equation_cues(
+    *,
+    inventory: CalculationInventory,
+    segments: Sequence[Mapping[str, Any]],
+) -> tuple[CalculationInventory, tuple[dict[str, Any], ...]]:
+    """Audit merged inventory items for direct displayed-equation cues."""
+
+    audited: list[CalculationItem] = []
+    records: list[dict[str, Any]] = []
+
+    for item in inventory.calculations:
+        source_parts: list[str] = []
+        for index in range(item.start_segment, item.end_segment + 1):
+            if index >= len(segments):
+                raise InventoryValidationError(
+                    f"{item.calculation_id} exceeds transcript during audit"
+                )
+            text = segments[index].get("text")
+            if not isinstance(text, str):
+                raise InventoryValidationError(
+                    f"segments[{index}].text must be a string"
+                )
+            source_parts.append(text.strip())
+
+        source_text = " ".join(source_parts)
+        detected = has_visual_equation_cue(source_text)
+
+        if not detected or item.visual_equation_cue:
+            audited.append(item)
+            continue
+
+        source_mode = item.source_mode
+        if source_mode is SourceMode.SPOKEN:
+            source_mode = (
+                SourceMode.MIXED
+                if item.operations_mentioned
+                else SourceMode.VISUAL_CUE
+            )
+
+        updated = CalculationItem(
+            calculation_id=item.calculation_id,
+            name=item.name,
+            source_mode=source_mode,
+            start_segment=item.start_segment,
+            end_segment=item.end_segment,
+            variables_mentioned=item.variables_mentioned,
+            operations_mentioned=item.operations_mentioned,
+            visual_equation_cue=True,
+            formula_expected=True,
+            reason=(
+                item.reason
+                + " Deterministic audit found a direct transcript cue "
+                  "to a displayed equation or formula."
+            ),
+        )
+        audited.append(updated)
+        records.append(
+            {
+                "calculation_id": item.calculation_id,
+                "action": "promoted_to_visual_review",
+                "start_segment": item.start_segment,
+                "end_segment": item.end_segment,
+                "source_text": source_text,
+                "before": {
+                    "source_mode": item.source_mode.value,
+                    "visual_equation_cue": item.visual_equation_cue,
+                    "formula_expected": item.formula_expected,
+                },
+                "after": {
+                    "source_mode": updated.source_mode.value,
+                    "visual_equation_cue": updated.visual_equation_cue,
+                    "formula_expected": updated.formula_expected,
+                },
+            }
+        )
+
+    return (
+        CalculationInventory(
+            schema_version=inventory.schema_version,
+            video_id=inventory.video_id,
+            calculations=tuple(audited),
+        ),
+        tuple(records),
+    )
 
 
 def parse_inventory_response(

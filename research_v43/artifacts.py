@@ -26,6 +26,10 @@ _REQUIRED_PAYLOADS = {
     "model_invocations.json",
 }
 
+_OPTIONAL_PAYLOADS = {
+    "inventory_audit.json",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ArtifactWriteResult:
@@ -53,8 +57,9 @@ def write_diagnostic_package(
     if not prompt_version.strip():
         raise ArtifactWriteError("prompt_version cannot be empty")
 
-    missing = _REQUIRED_PAYLOADS - set(payloads)
-    unexpected = set(payloads) - _REQUIRED_PAYLOADS
+    payload_names = set(payloads)
+    missing = _REQUIRED_PAYLOADS - payload_names
+    unexpected = payload_names - _REQUIRED_PAYLOADS - _OPTIONAL_PAYLOADS
     if missing or unexpected:
         raise ArtifactWriteError(
             "Diagnostic payload set is invalid; "
@@ -81,7 +86,10 @@ def write_diagnostic_package(
 
     try:
         artifact_hashes: dict[str, str] = {}
-        for name in sorted(_REQUIRED_PAYLOADS):
+        written_payloads = _REQUIRED_PAYLOADS | (
+            payload_names & _OPTIONAL_PAYLOADS
+        )
+        for name in sorted(written_payloads):
             path = temp_package / name
             serialized = (
                 json.dumps(

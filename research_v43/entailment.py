@@ -42,6 +42,7 @@ _OPERATION_CUES: dict[str, tuple[str, ...]] = {
     "division": (
         "divide",
         "divided",
+        "dividing",
         "division",
         "ratio",
         "over",

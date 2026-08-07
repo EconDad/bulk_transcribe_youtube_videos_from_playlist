@@ -21,6 +21,7 @@ from research_v43.artifacts import write_diagnostic_package
 from research_v43.calculation_inventory import (
     CalculationInventory,
     SourceMode,
+    audit_visual_equation_cues,
     build_inventory_chunks,
     build_inventory_prompt,
     merge_inventories,
@@ -49,9 +50,10 @@ from research_v43.model_client import ModelClientError, OllamaJsonClient
 
 
 PROMPT_VERSION = "phase4-qwen3-v4.3-stage-cd.1"
+INVENTORY_AUDIT_VERSION = "phase4-qwen3-v4.3-inventory-audit-cd.4b1"
 EXTRACTION_PROMPT_VERSION = "phase4-qwen3-v4.3-extraction-cd.4a"
-ENTAILMENT_PROMPT_VERSION = "phase4-qwen3-v4.3-entailment-cd.4a"
-PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.4a"
+ENTAILMENT_PROMPT_VERSION = "phase4-qwen3-v4.3-entailment-cd.4b1"
+PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.4b1"
 ENTAILMENT_INFERENCE_MODE = "direct-json-no-thinking-v1"
 INVENTORY_SYSTEM_PROMPT = (
     "You identify source-grounded calculation events. Return strict JSON. "
@@ -612,7 +614,7 @@ def run_pipeline(
     progress_dir = Path(progress_root) / video_id
     invocations: list[dict[str, Any]] = []
 
-    inventory = _run_inventory(
+    raw_inventory = _run_inventory(
         video_id=video_id,
         segments=segments,
         source_sha=source_sha,
@@ -623,6 +625,15 @@ def run_pipeline(
         resume=resume,
         inventory_num_predict=inventory_num_predict,
         invocations=invocations,
+    )
+
+    inventory, inventory_audit_records = audit_visual_equation_cues(
+        inventory=raw_inventory,
+        segments=segments,
+    )
+    _log(
+        "INVENTORY AUDIT: "
+        f"{len(inventory_audit_records)} visual cue promotion(s)"
     )
 
     retained_formulas: list[dict[str, Any]] = []
@@ -645,14 +656,14 @@ def run_pipeline(
             )
             continue
 
-        if item.source_mode is SourceMode.VISUAL_CUE:
+        if item.visual_equation_cue:
             resolutions.append(
                 {
                     "calculation_id": item.calculation_id,
                     "state": "visual_review_required",
                     "formula_ids": [],
                     "reason": (
-                        "The source announces a visual equation; Stage C-D.4A "
+                        "The source announces a visual equation; Stage C-D.4B.1 "
                         "does not yet perform frame recovery."
                     ),
                 }
@@ -861,6 +872,12 @@ def run_pipeline(
 
     payloads = {
         "calculation_inventory.json": inventory.to_dict(),
+        "inventory_audit.json": {
+            "schema_version": "1.0",
+            "video_id": video_id,
+            "audit_version": INVENTORY_AUDIT_VERSION,
+            "records": list(inventory_audit_records),
+        },
         "formulas.json": {
             "schema_version": "1.0",
             "video_id": video_id,
@@ -902,7 +919,7 @@ def run_pipeline(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run isolated research pipeline v4.3 Stage C-D.4A diagnostics."
+            "Run isolated research pipeline v4.3 Stage C-D.4B.1 diagnostics."
         )
     )
     parser.add_argument("video_id")
