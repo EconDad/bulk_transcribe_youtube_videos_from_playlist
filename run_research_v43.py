@@ -60,13 +60,13 @@ from research_v43.model_client import ModelClientError, OllamaJsonClient
 
 
 PROMPT_VERSION = "phase4-qwen3-v4.3-stage-cd.1"
-INVENTORY_AUDIT_VERSION = "phase4-qwen3-v4.3-inventory-audit-cd.4b3"
+INVENTORY_AUDIT_VERSION = "phase4-qwen3-v4.3-inventory-audit-cd.4b3.1"
 EVIDENCE_AUDIT_PROMPT_VERSION = (
-    "phase4-qwen3-v4.3-inventory-evidence-audit-cd.4b3"
+    "phase4-qwen3-v4.3-inventory-evidence-audit-cd.4b3.1"
 )
 EXTRACTION_PROMPT_VERSION = "phase4-qwen3-v4.3-extraction-cd.4a"
-ENTAILMENT_PROMPT_VERSION = "phase4-qwen3-v4.3-entailment-cd.4b3"
-PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.4b3"
+ENTAILMENT_PROMPT_VERSION = "phase4-qwen3-v4.3-entailment-cd.4b3.1"
+PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.4b3.1"
 ENTAILMENT_INFERENCE_MODE = "direct-json-no-thinking-v1"
 INVENTORY_SYSTEM_PROMPT = (
     "You identify source-grounded calculation events. Return strict JSON. "
@@ -881,6 +881,21 @@ def _run_inventory_evidence_audit(
         tuple(audit_records),
     )
 
+def _audit_failures_by_id(
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    # Index terminal inventory-audit failures for fail-closed routing.
+    failures: dict[str, Mapping[str, Any]] = {}
+    for record in records:
+        if record.get("action") != "audit_failed":
+            continue
+        calculation_id = record.get("calculation_id")
+        if not isinstance(calculation_id, str) or not calculation_id:
+            continue
+        failures[calculation_id] = record
+    return failures
+
+
 def run_pipeline(
     *,
     video_id: str,
@@ -942,6 +957,7 @@ def run_pipeline(
         "INVENTORY EVIDENCE AUDIT: "
         f"{len(evidence_audit_records)} selected item(s)"
     )
+    audit_failures = _audit_failures_by_id(evidence_audit_records)
 
     retained_formulas: list[dict[str, Any]] = []
     entailment_reports: list[dict[str, Any]] = []
@@ -949,6 +965,29 @@ def run_pipeline(
     resolutions: list[dict[str, Any]] = []
 
     for item in inventory.calculations:
+        audit_failure = audit_failures.get(item.calculation_id)
+        if audit_failure is not None:
+            validation_error = audit_failure.get("validation_error")
+            reason = (
+                "Inventory evidence audit remained unresolved after one "
+                "bounded repair; downstream formula extraction was skipped."
+            )
+            if isinstance(validation_error, str) and validation_error:
+                reason += f" {validation_error}"
+            resolutions.append(
+                {
+                    "calculation_id": item.calculation_id,
+                    "state": "insufficient_source_detail",
+                    "formula_ids": [],
+                    "reason": reason,
+                }
+            )
+            _log(
+                f"SKIP formula_extraction {item.calculation_id}: "
+                "inventory audit unresolved"
+            )
+            continue
+
         if not item.formula_expected and not item.visual_equation_cue:
             resolutions.append(
                 {
@@ -970,7 +1009,7 @@ def run_pipeline(
                     "state": "visual_review_required",
                     "formula_ids": [],
                     "reason": (
-                        "The source announces a visual equation; Stage C-D.4B.3 "
+                        "The source announces a visual equation; Stage C-D.4B.3.1 "
                         "does not yet perform frame recovery."
                     ),
                 }
@@ -1226,7 +1265,7 @@ def run_pipeline(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run isolated research pipeline v4.3 Stage C-D.4B.3 diagnostics."
+            "Run isolated research pipeline v4.3 Stage C-D.4B.3.1 diagnostics."
         )
     )
     parser.add_argument("video_id")

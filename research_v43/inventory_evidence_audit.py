@@ -354,8 +354,11 @@ def build_inventory_evidence_audit_prompt(
         "The inventory variables or operations may themselves be inaccurate.\n\n"
         "Return segment IDs and corrected inventory claims; do not return a "
         "formula, transcript quotes, evidence categories, or start/end ranges. "
-        "Python will copy source text, compute the span, and revalidate every "
-        "claim.\n\n"
+        "The selected segment IDs and the original item define one contiguous "
+        "candidate span. Python will validate revised variables and operations "
+        "against every transcript segment inside that span. When support is "
+        "distributed across the neighborhood, select outer segment endpoints "
+        "that bound the complete same-event explanation.\n\n"
         "Choose RECONCILE when the same calculation event is formula-bearing "
         "but the existing variables, operations, or span are wrong or "
         "incomplete. Prefer reusable short noun phrases actually spoken in "
@@ -372,8 +375,10 @@ def build_inventory_evidence_audit_prompt(
         "Do not invent textbook relationships or use outside knowledge.\n\n"
         "Do not borrow an operation from a neighboring numeric example unless "
         "the transcript explicitly links that procedure to this same event. "
-        "All evidence_segment_ids must refer only to supplied segments. Return "
-        "JSON only and match the schema exactly.\n\n"
+        "Evidence IDs are span boundaries, not a requirement to enumerate every "
+        "supporting segment. The entire bounded span must still describe the same "
+        "calculation event. All evidence_segment_ids must refer only to supplied "
+        "segments. Return JSON only and match the schema exactly.\n\n"
         f"CANONICAL OPERATIONS:\n{json.dumps(allowed_operations)}\n\n"
         f"CURRENT ITEM:\n{json.dumps(item.to_dict(), indent=2)}\n\n"
         "WHY DETERMINISTIC AUDIT COULD NOT FULLY GROUND IT:\n"
@@ -395,11 +400,14 @@ def build_inventory_evidence_repair_prompt(
     return (
         f"{original_prompt}\n\n"
         "Your previous response failed deterministic validation. Correct only "
-        "the action, evidence segment IDs, or revised inventory claims. If the "
-        "same calculation event cannot be reconciled using explicit bounded "
-        "source evidence, choose DOWNGRADE_NON_SYMBOLIC and return empty "
-        "revised claim arrays. Do not add quotes, formulas, evidence types, "
-        "start_segment, or end_segment.\n\n"
+        "the action, evidence segment IDs, or revised inventory claims. Evidence "
+        "segment IDs bound a contiguous candidate span together with the original "
+        "item. If the missing support exists elsewhere in the bounded "
+        "neighborhood for this same event, select outer endpoints that include "
+        "it. If the same calculation event still cannot be reconciled using "
+        "explicit bounded source evidence, choose DOWNGRADE_NON_SYMBOLIC and "
+        "return empty revised claim arrays. Do not add quotes, formulas, evidence "
+        "types, start_segment, or end_segment.\n\n"
         f"VALIDATION ERROR:\n{validation_error}\n\n"
         "PREVIOUS RESPONSE:\n"
         f"{json.dumps(dict(previous_response), indent=2)}"
@@ -483,14 +491,10 @@ def _selected_source_text(
     evidence_segment_ids: Sequence[int],
     segments: Sequence[Mapping[str, Any]],
 ) -> str:
-    ids = {
-        *range(item.start_segment, item.end_segment + 1),
-        *evidence_segment_ids,
-    }
-    return " ".join(
-        _range_text(segments, index, index)
-        for index in sorted(ids)
-    )
+    # Validate against the full contiguous candidate span.
+    start = min(item.start_segment, *evidence_segment_ids)
+    end = max(item.end_segment, *evidence_segment_ids)
+    return _range_text(segments, start, end)
 
 
 def _validate_revised_claims(
