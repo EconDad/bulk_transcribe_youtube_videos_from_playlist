@@ -46,18 +46,33 @@ from research_v43.expression_ast import (
     DerivationType,
     FormulaCandidate,
 )
+from research_v43.inventory_evidence_audit import (
+    AuditAction,
+    apply_inventory_audit_decision,
+    build_inventory_evidence_audit_prompt,
+    build_inventory_evidence_repair_prompt,
+    item_needs_evidence_audit,
+    parse_inventory_evidence_audit_response,
+)
 from research_v43.model_client import ModelClientError, OllamaJsonClient
 
 
 PROMPT_VERSION = "phase4-qwen3-v4.3-stage-cd.1"
-INVENTORY_AUDIT_VERSION = "phase4-qwen3-v4.3-inventory-audit-cd.4b1"
+INVENTORY_AUDIT_VERSION = "phase4-qwen3-v4.3-inventory-audit-cd.4b2"
+EVIDENCE_AUDIT_PROMPT_VERSION = (
+    "phase4-qwen3-v4.3-inventory-evidence-audit-cd.4b2"
+)
 EXTRACTION_PROMPT_VERSION = "phase4-qwen3-v4.3-extraction-cd.4a"
-ENTAILMENT_PROMPT_VERSION = "phase4-qwen3-v4.3-entailment-cd.4b1"
-PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.4b1"
+ENTAILMENT_PROMPT_VERSION = "phase4-qwen3-v4.3-entailment-cd.4b2"
+PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.4b2"
 ENTAILMENT_INFERENCE_MODE = "direct-json-no-thinking-v1"
 INVENTORY_SYSTEM_PROMPT = (
     "You identify source-grounded calculation events. Return strict JSON. "
     "Do not inject outside formulas or subject-matter knowledge."
+)
+INVENTORY_AUDIT_SYSTEM_PROMPT = (
+    "You audit one bounded calculation inventory item against exact transcript "
+    "evidence. Return strict JSON. Do not invent formulas or outside facts."
 )
 EXTRACTION_SYSTEM_PROMPT = (
     "You normalize formulas from one bounded calculation event. Return strict "
@@ -594,6 +609,213 @@ def _normalize_derivation_classification(
     return candidate
 
 
+
+def _run_inventory_evidence_audit(
+    *,
+    inventory: CalculationInventory,
+    segments: Sequence[Mapping[str, Any]],
+    video_id: str,
+    source_sha: str,
+    client: Any,
+    progress_dir: Path,
+    resume: bool,
+    num_predict: int,
+    invocations: list[dict[str, Any]],
+    radius: int = 8,
+) -> tuple[CalculationInventory, tuple[dict[str, Any], ...]]:
+    # Selectively audit only merged items whose current span lacks evidence.
+    audited_items = []
+    audit_records: list[dict[str, Any]] = []
+
+    for item in inventory.calculations:
+        needs_audit, selection_reasons = item_needs_evidence_audit(
+            item=item,
+            segments=segments,
+        )
+        if not needs_audit:
+            audited_items.append(item)
+            continue
+
+        neighborhood_start = max(0, item.start_segment - radius)
+        neighborhood_end = min(
+            len(segments) - 1,
+            item.end_segment + radius,
+        )
+        neighborhood = tuple(
+            {
+                "segment_id": index,
+                "text": segments[index].get("text"),
+            }
+            for index in range(neighborhood_start, neighborhood_end + 1)
+        )
+
+        prompt = build_inventory_evidence_audit_prompt(
+            item=item,
+            neighborhood_segments=neighborhood,
+            selection_reasons=selection_reasons,
+        )
+        item_sha = _canonical_sha(item.to_dict())
+        neighborhood_sha = _canonical_sha(neighborhood)
+        checkpoint = (
+            progress_dir
+            / "inventory_evidence_audit"
+            / f"{item.calculation_id}.json"
+        )
+        expected = {
+            "schema_version": "1.0",
+            "video_id": video_id,
+            "source_package_sha256": source_sha,
+            "prompt_version": EVIDENCE_AUDIT_PROMPT_VERSION,
+            "stage": "inventory_evidence_audit",
+            "calculation_id": item.calculation_id,
+            "calculation_sha256": item_sha,
+            "neighborhood_sha256": neighborhood_sha,
+            "radius": radius,
+        }
+        stage = f"inventory_evidence_audit {item.calculation_id}"
+
+        payload = _checkpointed_model_call(
+            client=client,
+            system_prompt=INVENTORY_AUDIT_SYSTEM_PROMPT,
+            user_prompt=prompt,
+            stage=stage,
+            checkpoint=checkpoint,
+            expected=expected,
+            resume=resume,
+            num_predict=min(max(num_predict, 1024), 2048),
+            invocations=invocations,
+            think=False,
+        )
+
+        try:
+            decision = parse_inventory_evidence_audit_response(
+                json.dumps(payload),
+                item=item,
+                segments=segments,
+                neighborhood_start=neighborhood_start,
+                neighborhood_end=neighborhood_end,
+            )
+        except Exception as first_error:
+            checkpoint.unlink(missing_ok=True)
+            repair_prompt = build_inventory_evidence_repair_prompt(
+                original_prompt=prompt,
+                previous_response=payload,
+                validation_error=(
+                    f"{type(first_error).__name__}: {first_error}"
+                ),
+            )
+            repair_checkpoint = (
+                progress_dir
+                / "inventory_evidence_audit"
+                / f"{item.calculation_id}.repair.json"
+            )
+            repair_expected = {
+                **expected,
+                "stage": "inventory_evidence_audit_repair",
+            }
+            _log(
+                f"RETRY inventory_evidence_audit_repair "
+                f"{item.calculation_id}; validation_error="
+                f"{type(first_error).__name__}: {first_error}"
+            )
+            repaired_payload = _checkpointed_model_call(
+                client=client,
+                system_prompt=INVENTORY_AUDIT_SYSTEM_PROMPT,
+                user_prompt=repair_prompt,
+                stage=(
+                    "inventory_evidence_audit_repair "
+                    f"{item.calculation_id}"
+                ),
+                checkpoint=repair_checkpoint,
+                expected=repair_expected,
+                resume=False,
+                num_predict=2048,
+                invocations=invocations,
+                think=False,
+            )
+            try:
+                decision = parse_inventory_evidence_audit_response(
+                    json.dumps(repaired_payload),
+                    item=item,
+                    segments=segments,
+                    neighborhood_start=neighborhood_start,
+                    neighborhood_end=neighborhood_end,
+                )
+            except Exception as repair_error:
+                _log(
+                    f"REJECT inventory_evidence_audit "
+                    f"{item.calculation_id}: "
+                    f"{type(repair_error).__name__}: {repair_error}"
+                )
+                audited_items.append(item)
+                audit_records.append(
+                    {
+                        "calculation_id": item.calculation_id,
+                        "action": "audit_failed",
+                        "selection_reasons": list(selection_reasons),
+                        "reason": (
+                            "Bounded evidence audit remained invalid after "
+                            "one repair; original inventory item preserved."
+                        ),
+                        "validation_error": (
+                            f"{type(repair_error).__name__}: "
+                            f"{repair_error}"
+                        ),
+                    }
+                )
+                continue
+
+        updated = apply_inventory_audit_decision(
+            item=item,
+            decision=decision,
+        )
+        audited_items.append(updated)
+        audit_records.append(
+            {
+                "calculation_id": item.calculation_id,
+                "action": decision.action.value,
+                "selection_reasons": list(selection_reasons),
+                "before": {
+                    "start_segment": item.start_segment,
+                    "end_segment": item.end_segment,
+                    "formula_expected": item.formula_expected,
+                },
+                "after": {
+                    "start_segment": updated.start_segment,
+                    "end_segment": updated.end_segment,
+                    "formula_expected": updated.formula_expected,
+                },
+                "reason": decision.reason,
+                "evidence": [
+                    record.to_dict()
+                    for record in decision.evidence
+                ],
+            }
+        )
+        if decision.action is AuditAction.EXPAND:
+            _log(
+                f"INVENTORY EXPAND {item.calculation_id}: "
+                f"S{item.start_segment}-S{item.end_segment} -> "
+                f"S{updated.start_segment}-S{updated.end_segment}"
+            )
+        elif decision.action is AuditAction.DOWNGRADE_NON_SYMBOLIC:
+            _log(
+                f"INVENTORY DOWNGRADE {item.calculation_id}: "
+                "formula_expected=false"
+            )
+        else:
+            _log(f"INVENTORY KEEP {item.calculation_id}")
+
+    return (
+        CalculationInventory(
+            schema_version=inventory.schema_version,
+            video_id=inventory.video_id,
+            calculations=tuple(audited_items),
+        ),
+        tuple(audit_records),
+    )
+
+
 def run_pipeline(
     *,
     video_id: str,
@@ -627,13 +849,33 @@ def run_pipeline(
         invocations=invocations,
     )
 
-    inventory, inventory_audit_records = audit_visual_equation_cues(
+    inventory, visual_audit_records = audit_visual_equation_cues(
         inventory=raw_inventory,
         segments=segments,
     )
     _log(
         "INVENTORY AUDIT: "
-        f"{len(inventory_audit_records)} visual cue promotion(s)"
+        f"{len(visual_audit_records)} visual cue promotion(s)"
+    )
+
+    inventory, evidence_audit_records = _run_inventory_evidence_audit(
+        inventory=inventory,
+        segments=segments,
+        video_id=video_id,
+        source_sha=source_sha,
+        client=client,
+        progress_dir=progress_dir,
+        resume=resume,
+        num_predict=detail_num_predict,
+        invocations=invocations,
+    )
+    inventory_audit_records = (
+        *visual_audit_records,
+        *evidence_audit_records,
+    )
+    _log(
+        "INVENTORY EVIDENCE AUDIT: "
+        f"{len(evidence_audit_records)} selected item(s)"
     )
 
     retained_formulas: list[dict[str, Any]] = []
@@ -663,7 +905,7 @@ def run_pipeline(
                     "state": "visual_review_required",
                     "formula_ids": [],
                     "reason": (
-                        "The source announces a visual equation; Stage C-D.4B.1 "
+                        "The source announces a visual equation; Stage C-D.4B.2 "
                         "does not yet perform frame recovery."
                     ),
                 }
@@ -919,7 +1161,7 @@ def run_pipeline(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run isolated research pipeline v4.3 Stage C-D.4B.1 diagnostics."
+            "Run isolated research pipeline v4.3 Stage C-D.4B.2 diagnostics."
         )
     )
     parser.add_argument("video_id")

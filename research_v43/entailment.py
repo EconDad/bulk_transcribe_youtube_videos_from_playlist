@@ -31,6 +31,9 @@ _OPERATION_CUES: dict[str, tuple[str, ...]] = {
         "difference",
         "less",
         "fewer",
+        "loss",
+        "lose",
+        "lost",
         "deduct",
     ),
     "multiplication": (
