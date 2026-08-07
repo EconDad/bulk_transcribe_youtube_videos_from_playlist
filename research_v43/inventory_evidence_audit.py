@@ -45,8 +45,37 @@ def _compact(value: str) -> str:
     return re.sub(r"[^a-z0-9.%$+-]+", "", value.casefold())
 
 
+_NUMERIC_LITERAL_RE = re.compile(
+    r"(?<![a-z0-9.])"
+    r"(?P<number>[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)"
+    r"\s*(?P<percent>%|percent\b)?",
+    re.IGNORECASE,
+)
+
+
 def _word_tokens(value: str) -> tuple[str, ...]:
     return tuple(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def _numeric_signatures(value: str) -> tuple[tuple[str, bool], ...]:
+    signatures: list[tuple[str, bool]] = []
+    for match in _NUMERIC_LITERAL_RE.finditer(value):
+        raw_number = match.group("number").replace(",", "")
+        try:
+            numeric = format(float(raw_number), ".15g")
+        except ValueError:
+            continue
+        signatures.append((numeric, bool(match.group("percent"))))
+    return tuple(signatures)
+
+
+def _semantic_word_tokens(value: str) -> tuple[str, ...]:
+    without_numbers = _NUMERIC_LITERAL_RE.sub(" ", value)
+    return tuple(
+        token
+        for token in re.findall(r"[a-z]+", without_numbers.casefold())
+        if len(token) > 1
+    )
 
 
 def _singularize_token(token: str) -> str:
@@ -82,6 +111,26 @@ def _variable_appears(variable: str, text: str) -> bool:
     normalized_text = _normalize(text)
     if normalized_variable and normalized_variable in normalized_text:
         return True
+
+    variable_numbers = _numeric_signatures(variable)
+    if variable_numbers:
+        text_numbers = _numeric_signatures(text)
+        for signature in variable_numbers:
+            if signature not in text_numbers:
+                return False
+
+        variable_words = [
+            _singularize_token(token)
+            for token in _semantic_word_tokens(variable)
+        ]
+        if not variable_words:
+            return True
+
+        text_words = {
+            _singularize_token(token)
+            for token in _semantic_word_tokens(text)
+        }
+        return all(token in text_words for token in variable_words)
 
     compact_variable = _compact(variable)
     compact_text = _compact(text)
@@ -159,6 +208,7 @@ def find_deterministic_expansion(
     segments: Sequence[Mapping[str, Any]],
     neighborhood_start: int,
     neighborhood_end: int,
+    max_auto_distance: int = 3,
 ) -> InventoryAuditDecision | None:
     """Find the minimal expansion that grounds every current inventory claim."""
 
@@ -182,7 +232,8 @@ def find_deterministic_expansion(
         matches = [
             index
             for index in range(neighborhood_start, neighborhood_end + 1)
-            if _variable_appears(
+            if _distance_to_item(index, item) <= max_auto_distance
+            and _variable_appears(
                 variable,
                 _range_text(segments, index, index),
             )
@@ -205,7 +256,8 @@ def find_deterministic_expansion(
         matches = [
             index
             for index in range(neighborhood_start, neighborhood_end + 1)
-            if _has_operation_cue(
+            if _distance_to_item(index, item) <= max_auto_distance
+            and _has_operation_cue(
                 operation,
                 _range_text(segments, index, index),
             )
@@ -328,6 +380,48 @@ def build_inventory_evidence_repair_prompt(
     )
 
 
+def _edit_distance(first: str, second: str) -> int:
+    previous = list(range(len(second) + 1))
+    for i, left in enumerate(first, start=1):
+        current = [i]
+        for j, right in enumerate(second, start=1):
+            substitution = previous[j - 1] + (left != right)
+            insertion = current[j - 1] + 1
+            deletion = previous[j] + 1
+            current.append(min(substitution, insertion, deletion))
+        previous = current
+    return previous[-1]
+
+
+def _parse_audit_action(value: Any) -> AuditAction:
+    if not isinstance(value, str):
+        raise InventoryEvidenceAuditError("invalid audit action")
+
+    normalized = re.sub(r"[\s-]+", "_", value.strip().casefold())
+    try:
+        return AuditAction(normalized)
+    except ValueError:
+        pass
+
+    candidates = []
+    for action in AuditAction:
+        distance = _edit_distance(normalized, action.value)
+        candidates.append((distance, action))
+
+    candidates.sort(key=lambda item: (item[0], item[1].value))
+    if (
+        candidates
+        and candidates[0][0] <= 2
+        and (
+            len(candidates) == 1
+            or candidates[0][0] < candidates[1][0]
+        )
+    ):
+        return candidates[0][1]
+
+    raise InventoryEvidenceAuditError("invalid audit action")
+
+
 def parse_inventory_evidence_audit_response(
     response_text: str,
     *,
@@ -361,10 +455,7 @@ def parse_inventory_evidence_audit_response(
     if raw["calculation_id"] != item.calculation_id:
         raise InventoryEvidenceAuditError("calculation_id does not match item")
 
-    try:
-        action = AuditAction(raw["action"])
-    except ValueError as exc:
-        raise InventoryEvidenceAuditError("invalid audit action") from exc
+    action = _parse_audit_action(raw["action"])
 
     evidence_ids_raw = raw["evidence_segment_ids"]
     if (

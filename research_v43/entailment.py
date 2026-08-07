@@ -34,6 +34,9 @@ _OPERATION_CUES: dict[str, tuple[str, ...]] = {
         "loss",
         "lose",
         "lost",
+        "profit",
+        "gain",
+        "gained",
         "deduct",
     ),
     "multiplication": (
@@ -708,8 +711,15 @@ def _has_operation_cue(operation: str, text: str) -> bool:
     cues = _OPERATION_CUES.get(operation)
     if not cues:
         return False
+
     normalized = _normalize(text)
-    return any(_normalize(cue) in normalized for cue in cues)
+    for cue in cues:
+        normalized_cue = _normalize(cue)
+        escaped = re.escape(normalized_cue).replace(r"\ ", r"\s+")
+        pattern = rf"(?<![a-z0-9_]){escaped}(?![a-z0-9_])"
+        if re.search(pattern, normalized):
+            return True
+    return False
 
 
 def _dependency_cycle_issues(
