@@ -9,7 +9,7 @@ import re
 from typing import Any, Mapping, Sequence
 
 from .calculation_inventory import CalculationItem, SourceMode
-from .entailment import _has_operation_cue
+from .entailment import _OPERATION_CUES, _has_operation_cue
 
 
 class InventoryEvidenceAuditError(ValueError):
@@ -18,6 +18,7 @@ class InventoryEvidenceAuditError(ValueError):
 
 class AuditAction(StrEnum):
     EXPAND = "expand"
+    RECONCILE = "reconcile"
     DOWNGRADE_NON_SYMBOLIC = "downgrade_non_symbolic"
 
 
@@ -27,6 +28,8 @@ class InventoryAuditDecision:
     action: AuditAction
     evidence_segment_ids: tuple[int, ...]
     reason: str
+    revised_variables_mentioned: tuple[str, ...] = ()
+    revised_operations_mentioned: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -34,6 +37,12 @@ class InventoryAuditDecision:
             "action": self.action.value,
             "evidence_segment_ids": list(self.evidence_segment_ids),
             "reason": self.reason,
+            "revised_variables_mentioned": list(
+                self.revised_variables_mentioned
+            ),
+            "revised_operations_mentioned": list(
+                self.revised_operations_mentioned
+            ),
         }
 
 
@@ -315,6 +324,8 @@ def find_deterministic_expansion(
             "Deterministic bounded search found the missing inventory "
             "variables and operation cues."
         ),
+        revised_variables_mentioned=item.variables_mentioned,
+        revised_operations_mentioned=item.operations_mentioned,
     )
 
 
@@ -324,32 +335,46 @@ def build_inventory_evidence_audit_prompt(
     neighborhood_segments: Sequence[Mapping[str, Any]],
     selection_reasons: Sequence[str],
 ) -> str:
-    """Ask the model only for source segment IDs and a terminal action."""
+    """Ask the model to reconcile faulty claims or downgrade the event."""
 
+    allowed_operations = sorted(_OPERATION_CUES)
     schema = {
         "calculation_id": item.calculation_id,
-        "action": "expand | downgrade_non_symbolic",
+        "action": "reconcile | downgrade_non_symbolic",
         "evidence_segment_ids": [item.start_segment],
+        "revised_variables_mentioned": ["source-grounded variable"],
+        "revised_operations_mentioned": ["multiplication"],
         "reason": "Source-grounded reason.",
     }
 
     return (
         "Audit one previously discovered calculation event using only the "
         "bounded transcript neighborhood below. Python has already tried to "
-        "locate every inventory variable and operation cue deterministically "
-        "and could not fully ground the current formula claim.\n\n"
-        "Return segment IDs only. Do not reproduce transcript quotes. Do not "
-        "classify evidence into categories. Do not calculate start/end ranges; "
-        "Python will do that deterministically.\n\n"
-        "Choose EXPAND only if the selected transcript segments, together with "
-        "the original item span, explicitly ground the reusable arithmetic "
-        "relationship or procedure already claimed by the inventory item. "
-        "Choose DOWNGRADE_NON_SYMBOLIC when the bounded source gives only a "
-        "numeric result, example, comparison, or observation without enough "
-        "source detail for that reusable symbolic relationship. Do not invent "
-        "a textbook formula or use outside subject-matter knowledge.\n\n"
-        "The evidence_segment_ids must refer only to supplied segment IDs. "
-        "Return JSON only and match the schema exactly.\n\n"
+        "ground the current inventory claims deterministically and could not. "
+        "The inventory variables or operations may themselves be inaccurate.\n\n"
+        "Return segment IDs and corrected inventory claims; do not return a "
+        "formula, transcript quotes, evidence categories, or start/end ranges. "
+        "Python will copy source text, compute the span, and revalidate every "
+        "claim.\n\n"
+        "Choose RECONCILE when the same calculation event is formula-bearing "
+        "but the existing variables, operations, or span are wrong or "
+        "incomplete. Prefer reusable short noun phrases actually spoken in "
+        "the selected source; use exact numeric literals when the source does "
+        "not name the quantity. Revised "
+        "operations must use only the canonical operation names listed below. "
+        "The corrected claims must preserve the semantic target of the same "
+        "calculation event; do not substitute a different neighboring example "
+        "or arithmetic sub-step.\n\n"
+        "Choose DOWNGRADE_NON_SYMBOLIC when the bounded source provides only a "
+        "numeric outcome, example, comparison, or observation without enough "
+        "detail for a reusable symbolic arithmetic relationship. For a "
+        "downgrade, return empty revised-variable and revised-operation arrays. "
+        "Do not invent textbook relationships or use outside knowledge.\n\n"
+        "Do not borrow an operation from a neighboring numeric example unless "
+        "the transcript explicitly links that procedure to this same event. "
+        "All evidence_segment_ids must refer only to supplied segments. Return "
+        "JSON only and match the schema exactly.\n\n"
+        f"CANONICAL OPERATIONS:\n{json.dumps(allowed_operations)}\n\n"
         f"CURRENT ITEM:\n{json.dumps(item.to_dict(), indent=2)}\n\n"
         "WHY DETERMINISTIC AUDIT COULD NOT FULLY GROUND IT:\n"
         f"{json.dumps(list(selection_reasons), indent=2)}\n\n"
@@ -370,10 +395,11 @@ def build_inventory_evidence_repair_prompt(
     return (
         f"{original_prompt}\n\n"
         "Your previous response failed deterministic validation. Correct only "
-        "the action or evidence segment IDs. If an EXPAND action cannot make "
-        "the existing inventory variables and operations source-grounded, "
-        "choose DOWNGRADE_NON_SYMBOLIC instead. Do not add quotes, evidence "
-        "types, start_segment, or end_segment.\n\n"
+        "the action, evidence segment IDs, or revised inventory claims. If the "
+        "same calculation event cannot be reconciled using explicit bounded "
+        "source evidence, choose DOWNGRADE_NON_SYMBOLIC and return empty "
+        "revised claim arrays. Do not add quotes, formulas, evidence types, "
+        "start_segment, or end_segment.\n\n"
         f"VALIDATION ERROR:\n{validation_error}\n\n"
         "PREVIOUS RESPONSE:\n"
         f"{json.dumps(dict(previous_response), indent=2)}"
@@ -422,6 +448,100 @@ def _parse_audit_action(value: Any) -> AuditAction:
     raise InventoryEvidenceAuditError("invalid audit action")
 
 
+def _parse_string_array(
+    value: Any,
+    *,
+    field: str,
+    max_items: int,
+) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise InventoryEvidenceAuditError(f"{field} must be an array")
+    if len(value) > max_items:
+        raise InventoryEvidenceAuditError(
+            f"{field} may contain at most {max_items} items"
+        )
+    result: list[str] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            raise InventoryEvidenceAuditError(
+                f"{field}[{index}] must be nonempty text"
+            )
+        normalized = item.strip()
+        if normalized in seen:
+            raise InventoryEvidenceAuditError(
+                f"{field} contains duplicate value: {normalized}"
+            )
+        seen.add(normalized)
+        result.append(normalized)
+    return tuple(result)
+
+
+def _selected_source_text(
+    *,
+    item: CalculationItem,
+    evidence_segment_ids: Sequence[int],
+    segments: Sequence[Mapping[str, Any]],
+) -> str:
+    ids = {
+        *range(item.start_segment, item.end_segment + 1),
+        *evidence_segment_ids,
+    }
+    return " ".join(
+        _range_text(segments, index, index)
+        for index in sorted(ids)
+    )
+
+
+def _validate_revised_claims(
+    *,
+    variables: Sequence[str],
+    operations: Sequence[str],
+    source_text: str,
+) -> None:
+    if not variables:
+        raise InventoryEvidenceAuditError(
+            "reconcile requires at least one revised variable"
+        )
+    if not operations:
+        raise InventoryEvidenceAuditError(
+            "reconcile requires at least one revised operation"
+        )
+
+    missing_variables = [
+        variable
+        for variable in variables
+        if not _variable_appears(variable, source_text)
+    ]
+    if missing_variables:
+        raise InventoryEvidenceAuditError(
+            "revised variables are not grounded in selected source: "
+            + ", ".join(missing_variables)
+        )
+
+    unknown_operations = [
+        operation
+        for operation in operations
+        if operation not in _OPERATION_CUES
+    ]
+    if unknown_operations:
+        raise InventoryEvidenceAuditError(
+            "revised operations are not canonical: "
+            + ", ".join(unknown_operations)
+        )
+
+    missing_operations = [
+        operation
+        for operation in operations
+        if not _has_operation_cue(operation, source_text)
+    ]
+    if missing_operations:
+        raise InventoryEvidenceAuditError(
+            "revised operations are not grounded in selected source: "
+            + ", ".join(missing_operations)
+        )
+
+
 def parse_inventory_evidence_audit_response(
     response_text: str,
     *,
@@ -430,7 +550,7 @@ def parse_inventory_evidence_audit_response(
     neighborhood_start: int,
     neighborhood_end: int,
 ) -> InventoryAuditDecision:
-    """Validate segment-ID-only model output."""
+    """Validate bounded model output and source-ground revised claims."""
 
     try:
         raw = json.loads(response_text)
@@ -442,15 +562,23 @@ def parse_inventory_evidence_audit_response(
     if not isinstance(raw, Mapping):
         raise InventoryEvidenceAuditError("audit response must be an object")
 
-    required = {
+    legacy_fields = {
         "calculation_id",
         "action",
         "evidence_segment_ids",
         "reason",
     }
-    if set(raw) != required:
+    reconcile_fields = {
+        *legacy_fields,
+        "revised_variables_mentioned",
+        "revised_operations_mentioned",
+    }
+    fields = set(raw)
+    if fields != legacy_fields and fields != reconcile_fields:
         raise InventoryEvidenceAuditError(
-            f"audit response must contain exactly {sorted(required)}"
+            "audit response has invalid fields; expected either legacy "
+            f"{sorted(legacy_fields)} or reconciliation "
+            f"{sorted(reconcile_fields)}"
         )
     if raw["calculation_id"] != item.calculation_id:
         raise InventoryEvidenceAuditError("calculation_id does not match item")
@@ -486,35 +614,95 @@ def parse_inventory_evidence_audit_response(
     if not isinstance(reason, str) or not reason.strip():
         raise InventoryEvidenceAuditError("reason must be nonempty text")
 
+    has_revised_fields = fields == reconcile_fields
+    if has_revised_fields:
+        revised_variables = _parse_string_array(
+            raw["revised_variables_mentioned"],
+            field="revised_variables_mentioned",
+            max_items=8,
+        )
+        revised_operations = _parse_string_array(
+            raw["revised_operations_mentioned"],
+            field="revised_operations_mentioned",
+            max_items=4,
+        )
+    else:
+        revised_variables = item.variables_mentioned
+        revised_operations = item.operations_mentioned
+
+    if action is AuditAction.DOWNGRADE_NON_SYMBOLIC:
+        if has_revised_fields and (revised_variables or revised_operations):
+            raise InventoryEvidenceAuditError(
+                "downgrade_non_symbolic requires empty revised claim arrays"
+            )
+        return InventoryAuditDecision(
+            calculation_id=item.calculation_id,
+            action=action,
+            evidence_segment_ids=tuple(sorted(evidence_ids)),
+            reason=reason.strip(),
+        )
+
+    if action is AuditAction.RECONCILE and not has_revised_fields:
+        raise InventoryEvidenceAuditError(
+            "reconcile requires revised claim arrays"
+        )
+
+    # Legacy model EXPAND remains valid for regression compatibility. New
+    # model responses use RECONCILE; an EXPAND carrying revised fields is
+    # normalized to RECONCILE because semantic claims may have changed.
+    if action is AuditAction.EXPAND and has_revised_fields:
+        action = AuditAction.RECONCILE
+
+    source_text = _selected_source_text(
+        item=item,
+        evidence_segment_ids=evidence_ids,
+        segments=segments,
+    )
+    _validate_revised_claims(
+        variables=revised_variables,
+        operations=revised_operations,
+        source_text=source_text,
+    )
+
     decision = InventoryAuditDecision(
         calculation_id=item.calculation_id,
         action=action,
         evidence_segment_ids=tuple(sorted(evidence_ids)),
         reason=reason.strip(),
+        revised_variables_mentioned=tuple(revised_variables),
+        revised_operations_mentioned=tuple(revised_operations),
+    )
+    updated = apply_inventory_audit_decision(
+        item=item,
+        decision=decision,
     )
 
-    if action is AuditAction.EXPAND:
-        updated = apply_inventory_audit_decision(
-            item=item,
-            decision=decision,
+    range_changed = (
+        updated.start_segment != item.start_segment
+        or updated.end_segment != item.end_segment
+    )
+    claims_changed = (
+        updated.variables_mentioned != item.variables_mentioned
+        or updated.operations_mentioned != item.operations_mentioned
+    )
+    if action is AuditAction.EXPAND and not range_changed:
+        raise InventoryEvidenceAuditError(
+            "expand evidence does not widen the inventory range"
         )
-        if (
-            updated.start_segment == item.start_segment
-            and updated.end_segment == item.end_segment
-        ):
-            raise InventoryEvidenceAuditError(
-                "expand evidence does not widen the inventory range"
-            )
+    if action is AuditAction.RECONCILE and not (range_changed or claims_changed):
+        raise InventoryEvidenceAuditError(
+            "reconcile must change the span or inventory claims"
+        )
 
-        still_needs_audit, reasons = item_needs_evidence_audit(
-            item=updated,
-            segments=segments,
+    still_needs_audit, reasons = item_needs_evidence_audit(
+        item=updated,
+        segments=segments,
+    )
+    if still_needs_audit:
+        raise InventoryEvidenceAuditError(
+            "reconciled evidence does not ground revised inventory claims: "
+            + "; ".join(reasons)
         )
-        if still_needs_audit:
-            raise InventoryEvidenceAuditError(
-                "expanded evidence does not ground current inventory claims: "
-                + "; ".join(reasons)
-            )
 
     return decision
 
@@ -524,7 +712,7 @@ def apply_inventory_audit_decision(
     item: CalculationItem,
     decision: InventoryAuditDecision,
 ) -> CalculationItem:
-    """Compute span and formula expectation deterministically."""
+    """Compute span, claims, and formula expectation deterministically."""
 
     if decision.calculation_id != item.calculation_id:
         raise InventoryEvidenceAuditError("decision belongs to another item")
@@ -533,10 +721,20 @@ def apply_inventory_audit_decision(
         start = item.start_segment
         end = item.end_segment
         formula_expected = False
+        variables = item.variables_mentioned
+        operations = item.operations_mentioned
     else:
         start = min(item.start_segment, *decision.evidence_segment_ids)
         end = max(item.end_segment, *decision.evidence_segment_ids)
-        formula_expected = item.formula_expected
+        formula_expected = True
+        variables = (
+            decision.revised_variables_mentioned
+            or item.variables_mentioned
+        )
+        operations = (
+            decision.revised_operations_mentioned
+            or item.operations_mentioned
+        )
 
     return CalculationItem(
         calculation_id=item.calculation_id,
@@ -544,8 +742,8 @@ def apply_inventory_audit_decision(
         source_mode=SourceMode(item.source_mode),
         start_segment=start,
         end_segment=end,
-        variables_mentioned=item.variables_mentioned,
-        operations_mentioned=item.operations_mentioned,
+        variables_mentioned=tuple(variables),
+        operations_mentioned=tuple(operations),
         visual_equation_cue=item.visual_equation_cue,
         formula_expected=formula_expected,
         reason=f"{item.reason} Evidence audit: {decision.reason}",

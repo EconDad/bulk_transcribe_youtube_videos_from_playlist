@@ -123,7 +123,7 @@ class InventoryEvidenceAuditRevisionTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(
             InventoryEvidenceAuditError,
-            "does not ground current inventory claims",
+            "revised operations are not grounded in selected source",
         ):
             parse_inventory_evidence_audit_response(
                 json.dumps(payload),

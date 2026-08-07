@@ -60,13 +60,13 @@ from research_v43.model_client import ModelClientError, OllamaJsonClient
 
 
 PROMPT_VERSION = "phase4-qwen3-v4.3-stage-cd.1"
-INVENTORY_AUDIT_VERSION = "phase4-qwen3-v4.3-inventory-audit-cd.4b2.2"
+INVENTORY_AUDIT_VERSION = "phase4-qwen3-v4.3-inventory-audit-cd.4b3"
 EVIDENCE_AUDIT_PROMPT_VERSION = (
-    "phase4-qwen3-v4.3-inventory-evidence-audit-cd.4b2.2"
+    "phase4-qwen3-v4.3-inventory-evidence-audit-cd.4b3"
 )
 EXTRACTION_PROMPT_VERSION = "phase4-qwen3-v4.3-extraction-cd.4a"
-ENTAILMENT_PROMPT_VERSION = "phase4-qwen3-v4.3-entailment-cd.4b2.2"
-PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.4b2.2"
+ENTAILMENT_PROMPT_VERSION = "phase4-qwen3-v4.3-entailment-cd.4b3"
+PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.4b3"
 ENTAILMENT_INFERENCE_MODE = "direct-json-no-thinking-v1"
 INVENTORY_SYSTEM_PROMPT = (
     "You identify source-grounded calculation events. Return strict JSON. "
@@ -667,11 +667,15 @@ def _run_inventory_evidence_audit(
                         "start_segment": item.start_segment,
                         "end_segment": item.end_segment,
                         "formula_expected": item.formula_expected,
+                    "variables_mentioned": list(item.variables_mentioned),
+                    "operations_mentioned": list(item.operations_mentioned),
                     },
                     "after": {
                         "start_segment": updated.start_segment,
                         "end_segment": updated.end_segment,
                         "formula_expected": updated.formula_expected,
+                    "variables_mentioned": list(updated.variables_mentioned),
+                    "operations_mentioned": list(updated.operations_mentioned),
                     },
                     "reason": deterministic.reason,
                     "evidence": list(
@@ -828,11 +832,15 @@ def _run_inventory_evidence_audit(
                     "start_segment": item.start_segment,
                     "end_segment": item.end_segment,
                     "formula_expected": item.formula_expected,
+                    "variables_mentioned": list(item.variables_mentioned),
+                    "operations_mentioned": list(item.operations_mentioned),
                 },
                 "after": {
                     "start_segment": updated.start_segment,
                     "end_segment": updated.end_segment,
                     "formula_expected": updated.formula_expected,
+                    "variables_mentioned": list(updated.variables_mentioned),
+                    "operations_mentioned": list(updated.operations_mentioned),
                 },
                 "reason": decision.reason,
                 "evidence": list(
@@ -849,6 +857,14 @@ def _run_inventory_evidence_audit(
                 f"INVENTORY MODEL-EXPAND {item.calculation_id}: "
                 f"S{item.start_segment}-S{item.end_segment} -> "
                 f"S{updated.start_segment}-S{updated.end_segment}"
+            )
+        elif decision.action is AuditAction.RECONCILE:
+            _log(
+                f"INVENTORY RECONCILE {item.calculation_id}: "
+                f"S{item.start_segment}-S{item.end_segment} -> "
+                f"S{updated.start_segment}-S{updated.end_segment}; "
+                f"variables={list(updated.variables_mentioned)}; "
+                f"operations={list(updated.operations_mentioned)}"
             )
         else:
             _log(
@@ -954,7 +970,7 @@ def run_pipeline(
                     "state": "visual_review_required",
                     "formula_ids": [],
                     "reason": (
-                        "The source announces a visual equation; Stage C-D.4B.2.2 "
+                        "The source announces a visual equation; Stage C-D.4B.3 "
                         "does not yet perform frame recovery."
                     ),
                 }
@@ -1210,7 +1226,7 @@ def run_pipeline(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run isolated research pipeline v4.3 Stage C-D.4B.2.2 diagnostics."
+            "Run isolated research pipeline v4.3 Stage C-D.4B.3 diagnostics."
         )
     )
     parser.add_argument("video_id")
