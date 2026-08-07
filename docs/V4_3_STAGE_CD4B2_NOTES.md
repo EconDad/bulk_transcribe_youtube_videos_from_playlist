@@ -1,22 +1,22 @@
-# v4.3 Stage C-D.4B.2 — Bounded Evidence Audit
+# v4.3 Stage C-D.4B.2.1 — Deterministic-First Evidence Audit
 
-This milestone adds a selective, source-grounded audit between merged inventory
-discovery and formula extraction.
+This revision repairs the real-video interface failure observed in Stage C-D.4B.2.
 
-- Raw calculation-inventory model checkpoints remain valid.
-- The deterministic visual-equation audit from 4B.1 remains first.
-- Only formula-expected, nonvisual items whose current span fails deterministic
-  variable/operation evidence checks are sent to the evidence-audit model.
-- Each selected item receives a bounded ±8 segment neighborhood.
-- The audit can keep the range, minimally expand it, or downgrade a result-only
-  observation to `formula_expected=false`.
-- Every model evidence quote is deterministically checked against the cited
-  transcript range.
-- One bounded repair is allowed for malformed audit output.
-- A failed repair preserves the original item and records `audit_failed`.
-- Decisions are appended to `inventory_audit.json`.
-- Changed item content invalidates extraction automatically through item SHA.
-- Entailment is version-invalidated because subtraction evidence now recognizes
-  generic `loss`, `lose`, and `lost` language.
+- Python first searches the bounded neighborhood for every missing inventory
+  variable and recognized operation cue.
+- Variable matching includes small domain-neutral singular/plural normalization.
+- When all claims are found, Python computes the minimal contiguous expansion
+  without a model call.
+- Remaining cases use a reduced model schema containing only calculation ID,
+  action, evidence segment IDs, and reason.
+- The model no longer supplies transcript quotes, evidence-kind labels, or
+  start/end ranges.
+- Python copies exact source text and computes the final range.
+- Model expansion is accepted only if the resulting range deterministically
+  grounds the existing inventory variables and operation cues.
+- Otherwise one repair is allowed, with downgrade as the supported terminal
+  path when a reusable symbolic relationship is not source-grounded.
+- Entailment checkpoints are version-invalidated because audited spans may
+  change even when a formula candidate is textually identical.
 
-No subject-specific equations, variables, or aliases are included.
+No subject-specific equations, variables, or aliases are introduced.

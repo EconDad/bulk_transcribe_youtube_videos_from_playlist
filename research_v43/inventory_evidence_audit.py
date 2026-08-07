@@ -1,4 +1,4 @@
-"""Bounded evidence audit for merged v4.3 calculation inventory items."""
+"""Deterministic-first bounded evidence audit for v4.3 inventory items."""
 
 from __future__ import annotations
 
@@ -17,50 +17,23 @@ class InventoryEvidenceAuditError(ValueError):
 
 
 class AuditAction(StrEnum):
-    KEEP = "keep"
     EXPAND = "expand"
     DOWNGRADE_NON_SYMBOLIC = "downgrade_non_symbolic"
-
-
-class EvidenceKind(StrEnum):
-    RELATIONSHIP = "relationship"
-    OPERAND = "operand"
-    RESULT = "result"
-
-
-@dataclass(frozen=True, slots=True)
-class AuditEvidence:
-    kind: EvidenceKind
-    start_segment: int
-    end_segment: int
-    quote: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "kind": self.kind.value,
-            "start_segment": self.start_segment,
-            "end_segment": self.end_segment,
-            "quote": self.quote,
-        }
 
 
 @dataclass(frozen=True, slots=True)
 class InventoryAuditDecision:
     calculation_id: str
     action: AuditAction
-    start_segment: int
-    end_segment: int
+    evidence_segment_ids: tuple[int, ...]
     reason: str
-    evidence: tuple[AuditEvidence, ...]
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "calculation_id": self.calculation_id,
             "action": self.action.value,
-            "start_segment": self.start_segment,
-            "end_segment": self.end_segment,
+            "evidence_segment_ids": list(self.evidence_segment_ids),
             "reason": self.reason,
-            "evidence": [item.to_dict() for item in self.evidence],
         }
 
 
@@ -70,6 +43,18 @@ def _normalize(value: str) -> str:
 
 def _compact(value: str) -> str:
     return re.sub(r"[^a-z0-9.%$+-]+", "", value.casefold())
+
+
+def _word_tokens(value: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def _singularize_token(token: str) -> str:
+    if len(token) > 4 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
 
 
 def _range_text(
@@ -103,12 +88,28 @@ def _variable_appears(variable: str, text: str) -> bool:
     if compact_variable and compact_variable in compact_text:
         return True
 
-    tokens = [
-        token
-        for token in re.findall(r"[a-z0-9]+", normalized_variable)
+    variable_tokens = [
+        _singularize_token(token)
+        for token in _word_tokens(variable)
         if len(token) > 1
     ]
-    return bool(tokens) and all(token in normalized_text for token in tokens)
+    text_tokens = {
+        _singularize_token(token)
+        for token in _word_tokens(text)
+        if len(token) > 1
+    }
+    return bool(variable_tokens) and all(
+        token in text_tokens
+        for token in variable_tokens
+    )
+
+
+def _distance_to_item(index: int, item: CalculationItem) -> int:
+    if item.start_segment <= index <= item.end_segment:
+        return 0
+    if index < item.start_segment:
+        return item.start_segment - index
+    return index - item.end_segment
 
 
 def item_needs_evidence_audit(
@@ -116,7 +117,7 @@ def item_needs_evidence_audit(
     item: CalculationItem,
     segments: Sequence[Mapping[str, Any]],
 ) -> tuple[bool, tuple[str, ...]]:
-    """Select only inventory items whose current span lacks claimed evidence."""
+    """Select items whose current span does not ground inventory claims."""
 
     if not item.formula_expected or item.visual_equation_cue:
         return False, ()
@@ -152,52 +153,153 @@ def item_needs_evidence_audit(
     return bool(reasons), tuple(reasons)
 
 
+def find_deterministic_expansion(
+    *,
+    item: CalculationItem,
+    segments: Sequence[Mapping[str, Any]],
+    neighborhood_start: int,
+    neighborhood_end: int,
+) -> InventoryAuditDecision | None:
+    """Find the minimal expansion that grounds every current inventory claim."""
+
+    needs_audit, _ = item_needs_evidence_audit(
+        item=item,
+        segments=segments,
+    )
+    if not needs_audit:
+        return None
+
+    selected: set[int] = set()
+    current_text = _range_text(
+        segments,
+        item.start_segment,
+        item.end_segment,
+    )
+
+    for variable in item.variables_mentioned:
+        if _variable_appears(variable, current_text):
+            continue
+        matches = [
+            index
+            for index in range(neighborhood_start, neighborhood_end + 1)
+            if _variable_appears(
+                variable,
+                _range_text(segments, index, index),
+            )
+        ]
+        if not matches:
+            return None
+        selected.add(
+            min(
+                matches,
+                key=lambda index: (
+                    _distance_to_item(index, item),
+                    index,
+                ),
+            )
+        )
+
+    for operation in item.operations_mentioned:
+        if _has_operation_cue(operation, current_text):
+            continue
+        matches = [
+            index
+            for index in range(neighborhood_start, neighborhood_end + 1)
+            if _has_operation_cue(
+                operation,
+                _range_text(segments, index, index),
+            )
+        ]
+        if not matches:
+            return None
+        selected.add(
+            min(
+                matches,
+                key=lambda index: (
+                    _distance_to_item(index, item),
+                    index,
+                ),
+            )
+        )
+
+    if not selected:
+        return None
+
+    start = min(item.start_segment, *selected)
+    end = max(item.end_segment, *selected)
+
+    candidate = CalculationItem(
+        calculation_id=item.calculation_id,
+        name=item.name,
+        source_mode=SourceMode(item.source_mode),
+        start_segment=start,
+        end_segment=end,
+        variables_mentioned=item.variables_mentioned,
+        operations_mentioned=item.operations_mentioned,
+        visual_equation_cue=item.visual_equation_cue,
+        formula_expected=item.formula_expected,
+        reason=item.reason,
+    )
+    still_needs_audit, _ = item_needs_evidence_audit(
+        item=candidate,
+        segments=segments,
+    )
+    if still_needs_audit:
+        return None
+
+    evidence_ids = tuple(
+        sorted(
+            {
+                *selected,
+                *range(item.start_segment, item.end_segment + 1),
+            }
+        )
+    )
+    return InventoryAuditDecision(
+        calculation_id=item.calculation_id,
+        action=AuditAction.EXPAND,
+        evidence_segment_ids=evidence_ids,
+        reason=(
+            "Deterministic bounded search found the missing inventory "
+            "variables and operation cues."
+        ),
+    )
+
+
 def build_inventory_evidence_audit_prompt(
     *,
     item: CalculationItem,
     neighborhood_segments: Sequence[Mapping[str, Any]],
     selection_reasons: Sequence[str],
 ) -> str:
-    """Build a domain-neutral, bounded evidence-audit prompt."""
-
-    if not neighborhood_segments:
-        raise InventoryEvidenceAuditError("neighborhood cannot be empty")
+    """Ask the model only for source segment IDs and a terminal action."""
 
     schema = {
         "calculation_id": item.calculation_id,
-        "action": "keep | expand | downgrade_non_symbolic",
-        "start_segment": item.start_segment,
-        "end_segment": item.end_segment,
+        "action": "expand | downgrade_non_symbolic",
+        "evidence_segment_ids": [item.start_segment],
         "reason": "Source-grounded reason.",
-        "evidence": [
-            {
-                "kind": "relationship | operand | result",
-                "start_segment": item.start_segment,
-                "end_segment": item.end_segment,
-                "quote": "Exact transcript quote.",
-            }
-        ],
     }
 
     return (
         "Audit one previously discovered calculation event using only the "
-        "bounded transcript neighborhood below. Do not invent a formula and "
-        "do not use outside subject-matter knowledge.\n\n"
-        "Choose KEEP only when the current inventory span already contains "
-        "enough source evidence for the reusable arithmetic relationship or "
-        "procedure claimed by the item.\n"
-        "Choose EXPAND only when nearby transcript segments supply missing "
-        "operands, operation language, result language, or relationship "
-        "context. The expanded range must be the smallest contiguous range "
-        "that includes the original inventory range and all cited evidence.\n"
-        "Choose DOWNGRADE_NON_SYMBOLIC only when the bounded source gives a "
-        "numeric outcome, comparison, or observation but does not ground a "
-        "reusable symbolic arithmetic relationship or procedure. Do not "
-        "downgrade merely because the equation is difficult.\n"
-        "Every evidence quote must be copied exactly from the supplied "
-        "transcript. Return JSON only and match the schema exactly.\n\n"
+        "bounded transcript neighborhood below. Python has already tried to "
+        "locate every inventory variable and operation cue deterministically "
+        "and could not fully ground the current formula claim.\n\n"
+        "Return segment IDs only. Do not reproduce transcript quotes. Do not "
+        "classify evidence into categories. Do not calculate start/end ranges; "
+        "Python will do that deterministically.\n\n"
+        "Choose EXPAND only if the selected transcript segments, together with "
+        "the original item span, explicitly ground the reusable arithmetic "
+        "relationship or procedure already claimed by the inventory item. "
+        "Choose DOWNGRADE_NON_SYMBOLIC when the bounded source gives only a "
+        "numeric result, example, comparison, or observation without enough "
+        "source detail for that reusable symbolic relationship. Do not invent "
+        "a textbook formula or use outside subject-matter knowledge.\n\n"
+        "The evidence_segment_ids must refer only to supplied segment IDs. "
+        "Return JSON only and match the schema exactly.\n\n"
         f"CURRENT ITEM:\n{json.dumps(item.to_dict(), indent=2)}\n\n"
-        "WHY THIS ITEM WAS SELECTED FOR AUDIT:\n"
+        "WHY DETERMINISTIC AUDIT COULD NOT FULLY GROUND IT:\n"
         f"{json.dumps(list(selection_reasons), indent=2)}\n\n"
         f"SCHEMA:\n{json.dumps(schema, indent=2)}\n\n"
         "BOUNDED TRANSCRIPT NEIGHBORHOOD:\n"
@@ -211,14 +313,15 @@ def build_inventory_evidence_repair_prompt(
     previous_response: Mapping[str, Any],
     validation_error: str,
 ) -> str:
-    """Request one schema-only correction without adding source evidence."""
+    """Request one correction using the same bounded source."""
 
     return (
         f"{original_prompt}\n\n"
-        "Your previous JSON response failed deterministic validation. "
-        "Correct only the response structure, ranges, action, or quoted "
-        "evidence using the same bounded transcript. Do not invent new "
-        "evidence or outside facts.\n\n"
+        "Your previous response failed deterministic validation. Correct only "
+        "the action or evidence segment IDs. If an EXPAND action cannot make "
+        "the existing inventory variables and operations source-grounded, "
+        "choose DOWNGRADE_NON_SYMBOLIC instead. Do not add quotes, evidence "
+        "types, start_segment, or end_segment.\n\n"
         f"VALIDATION ERROR:\n{validation_error}\n\n"
         "PREVIOUS RESPONSE:\n"
         f"{json.dumps(dict(previous_response), indent=2)}"
@@ -233,7 +336,7 @@ def parse_inventory_evidence_audit_response(
     neighborhood_start: int,
     neighborhood_end: int,
 ) -> InventoryAuditDecision:
-    """Parse and deterministically validate one audit response."""
+    """Validate segment-ID-only model output."""
 
     try:
         raw = json.loads(response_text)
@@ -248,16 +351,13 @@ def parse_inventory_evidence_audit_response(
     required = {
         "calculation_id",
         "action",
-        "start_segment",
-        "end_segment",
+        "evidence_segment_ids",
         "reason",
-        "evidence",
     }
     if set(raw) != required:
         raise InventoryEvidenceAuditError(
             f"audit response must contain exactly {sorted(required)}"
         )
-
     if raw["calculation_id"] != item.calculation_id:
         raise InventoryEvidenceAuditError("calculation_id does not match item")
 
@@ -266,128 +366,66 @@ def parse_inventory_evidence_audit_response(
     except ValueError as exc:
         raise InventoryEvidenceAuditError("invalid audit action") from exc
 
-    start = raw["start_segment"]
-    end = raw["end_segment"]
+    evidence_ids_raw = raw["evidence_segment_ids"]
     if (
-        isinstance(start, bool)
-        or isinstance(end, bool)
-        or not isinstance(start, int)
-        or not isinstance(end, int)
+        isinstance(evidence_ids_raw, (str, bytes))
+        or not isinstance(evidence_ids_raw, Sequence)
+        or not evidence_ids_raw
     ):
-        raise InventoryEvidenceAuditError("audit ranges must be integers")
-    if start < neighborhood_start or end > neighborhood_end or end < start:
         raise InventoryEvidenceAuditError(
-            "audit range falls outside bounded neighborhood"
-        )
-    if start > item.start_segment or end < item.end_segment:
-        raise InventoryEvidenceAuditError(
-            "audit range must include original inventory range"
+            "evidence_segment_ids must be a nonempty array"
         )
 
-    if action is AuditAction.KEEP and (
-        start != item.start_segment or end != item.end_segment
-    ):
-        raise InventoryEvidenceAuditError(
-            "keep action must preserve the original inventory range"
-        )
-    if action is AuditAction.EXPAND and (
-        start == item.start_segment and end == item.end_segment
-    ):
-        raise InventoryEvidenceAuditError(
-            "expand action must widen the inventory range"
-        )
-    if action is AuditAction.DOWNGRADE_NON_SYMBOLIC and (
-        start != item.start_segment or end != item.end_segment
-    ):
-        raise InventoryEvidenceAuditError(
-            "downgrade_non_symbolic must preserve the original range"
-        )
+    evidence_ids: list[int] = []
+    seen: set[int] = set()
+    for index, value in enumerate(evidence_ids_raw):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise InventoryEvidenceAuditError(
+                f"evidence_segment_ids[{index}] must be an integer"
+            )
+        if value < neighborhood_start or value > neighborhood_end:
+            raise InventoryEvidenceAuditError(
+                f"evidence segment {value} falls outside bounded neighborhood"
+            )
+        if value not in seen:
+            seen.add(value)
+            evidence_ids.append(value)
 
     reason = raw["reason"]
     if not isinstance(reason, str) or not reason.strip():
         raise InventoryEvidenceAuditError("reason must be nonempty text")
 
-    raw_evidence = raw["evidence"]
-    if (
-        isinstance(raw_evidence, (str, bytes))
-        or not isinstance(raw_evidence, Sequence)
-        or not raw_evidence
-    ):
-        raise InventoryEvidenceAuditError(
-            "evidence must be a nonempty array"
-        )
-
-    evidence: list[AuditEvidence] = []
-    for index, record in enumerate(raw_evidence):
-        if not isinstance(record, Mapping):
-            raise InventoryEvidenceAuditError(
-                f"evidence[{index}] must be an object"
-            )
-        expected = {"kind", "start_segment", "end_segment", "quote"}
-        if set(record) != expected:
-            raise InventoryEvidenceAuditError(
-                f"evidence[{index}] must contain exactly {sorted(expected)}"
-            )
-        try:
-            kind = EvidenceKind(record["kind"])
-        except ValueError as exc:
-            raise InventoryEvidenceAuditError(
-                f"evidence[{index}] has invalid kind"
-            ) from exc
-
-        ev_start = record["start_segment"]
-        ev_end = record["end_segment"]
-        quote = record["quote"]
-        if (
-            isinstance(ev_start, bool)
-            or isinstance(ev_end, bool)
-            or not isinstance(ev_start, int)
-            or not isinstance(ev_end, int)
-            or ev_end < ev_start
-        ):
-            raise InventoryEvidenceAuditError(
-                f"evidence[{index}] has invalid range"
-            )
-        if ev_start < start or ev_end > end:
-            raise InventoryEvidenceAuditError(
-                f"evidence[{index}] falls outside audited item range"
-            )
-        if not isinstance(quote, str) or not quote.strip():
-            raise InventoryEvidenceAuditError(
-                f"evidence[{index}].quote must be nonempty"
-            )
-        source = _range_text(segments, ev_start, ev_end)
-        if _normalize(quote) not in _normalize(source):
-            raise InventoryEvidenceAuditError(
-                f"evidence[{index}] quote is not present in cited segments"
-            )
-
-        evidence.append(
-            AuditEvidence(
-                kind=kind,
-                start_segment=ev_start,
-                end_segment=ev_end,
-                quote=quote.strip(),
-            )
-        )
-
-    if action in {AuditAction.KEEP, AuditAction.EXPAND}:
-        if not any(
-            item.kind is EvidenceKind.RELATIONSHIP
-            for item in evidence
-        ):
-            raise InventoryEvidenceAuditError(
-                "keep/expand requires relationship evidence"
-            )
-
-    return InventoryAuditDecision(
+    decision = InventoryAuditDecision(
         calculation_id=item.calculation_id,
         action=action,
-        start_segment=start,
-        end_segment=end,
+        evidence_segment_ids=tuple(sorted(evidence_ids)),
         reason=reason.strip(),
-        evidence=tuple(evidence),
     )
+
+    if action is AuditAction.EXPAND:
+        updated = apply_inventory_audit_decision(
+            item=item,
+            decision=decision,
+        )
+        if (
+            updated.start_segment == item.start_segment
+            and updated.end_segment == item.end_segment
+        ):
+            raise InventoryEvidenceAuditError(
+                "expand evidence does not widen the inventory range"
+            )
+
+        still_needs_audit, reasons = item_needs_evidence_audit(
+            item=updated,
+            segments=segments,
+        )
+        if still_needs_audit:
+            raise InventoryEvidenceAuditError(
+                "expanded evidence does not ground current inventory claims: "
+                + "; ".join(reasons)
+            )
+
+    return decision
 
 
 def apply_inventory_audit_decision(
@@ -395,24 +433,45 @@ def apply_inventory_audit_decision(
     item: CalculationItem,
     decision: InventoryAuditDecision,
 ) -> CalculationItem:
-    """Apply a validated audit decision without changing semantic claims."""
+    """Compute span and formula expectation deterministically."""
 
     if decision.calculation_id != item.calculation_id:
         raise InventoryEvidenceAuditError("decision belongs to another item")
 
-    formula_expected = item.formula_expected
     if decision.action is AuditAction.DOWNGRADE_NON_SYMBOLIC:
+        start = item.start_segment
+        end = item.end_segment
         formula_expected = False
+    else:
+        start = min(item.start_segment, *decision.evidence_segment_ids)
+        end = max(item.end_segment, *decision.evidence_segment_ids)
+        formula_expected = item.formula_expected
 
     return CalculationItem(
         calculation_id=item.calculation_id,
         name=item.name,
         source_mode=SourceMode(item.source_mode),
-        start_segment=decision.start_segment,
-        end_segment=decision.end_segment,
+        start_segment=start,
+        end_segment=end,
         variables_mentioned=item.variables_mentioned,
         operations_mentioned=item.operations_mentioned,
         visual_equation_cue=item.visual_equation_cue,
         formula_expected=formula_expected,
         reason=f"{item.reason} Evidence audit: {decision.reason}",
+    )
+
+
+def decision_evidence_records(
+    *,
+    decision: InventoryAuditDecision,
+    segments: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Copy canonical source text for selected evidence IDs."""
+
+    return tuple(
+        {
+            "segment_id": segment_id,
+            "source_text": _range_text(segments, segment_id, segment_id),
+        }
+        for segment_id in decision.evidence_segment_ids
     )

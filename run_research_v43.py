@@ -51,6 +51,8 @@ from research_v43.inventory_evidence_audit import (
     apply_inventory_audit_decision,
     build_inventory_evidence_audit_prompt,
     build_inventory_evidence_repair_prompt,
+    decision_evidence_records,
+    find_deterministic_expansion,
     item_needs_evidence_audit,
     parse_inventory_evidence_audit_response,
 )
@@ -58,13 +60,13 @@ from research_v43.model_client import ModelClientError, OllamaJsonClient
 
 
 PROMPT_VERSION = "phase4-qwen3-v4.3-stage-cd.1"
-INVENTORY_AUDIT_VERSION = "phase4-qwen3-v4.3-inventory-audit-cd.4b2"
+INVENTORY_AUDIT_VERSION = "phase4-qwen3-v4.3-inventory-audit-cd.4b2.1"
 EVIDENCE_AUDIT_PROMPT_VERSION = (
-    "phase4-qwen3-v4.3-inventory-evidence-audit-cd.4b2"
+    "phase4-qwen3-v4.3-inventory-evidence-audit-cd.4b2.1"
 )
 EXTRACTION_PROMPT_VERSION = "phase4-qwen3-v4.3-extraction-cd.4a"
-ENTAILMENT_PROMPT_VERSION = "phase4-qwen3-v4.3-entailment-cd.4b2"
-PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.4b2"
+ENTAILMENT_PROMPT_VERSION = "phase4-qwen3-v4.3-entailment-cd.4b2.1"
+PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.4b2.1"
 ENTAILMENT_INFERENCE_MODE = "direct-json-no-thinking-v1"
 INVENTORY_SYSTEM_PROMPT = (
     "You identify source-grounded calculation events. Return strict JSON. "
@@ -623,7 +625,8 @@ def _run_inventory_evidence_audit(
     invocations: list[dict[str, Any]],
     radius: int = 8,
 ) -> tuple[CalculationInventory, tuple[dict[str, Any], ...]]:
-    # Selectively audit only merged items whose current span lacks evidence.
+    """Run deterministic-first bounded inventory evidence auditing."""
+
     audited_items = []
     audit_records: list[dict[str, Any]] = []
 
@@ -641,6 +644,51 @@ def _run_inventory_evidence_audit(
             len(segments) - 1,
             item.end_segment + radius,
         )
+
+        deterministic = find_deterministic_expansion(
+            item=item,
+            segments=segments,
+            neighborhood_start=neighborhood_start,
+            neighborhood_end=neighborhood_end,
+        )
+        if deterministic is not None:
+            updated = apply_inventory_audit_decision(
+                item=item,
+                decision=deterministic,
+            )
+            audited_items.append(updated)
+            audit_records.append(
+                {
+                    "calculation_id": item.calculation_id,
+                    "action": "expand",
+                    "decision_source": "deterministic",
+                    "selection_reasons": list(selection_reasons),
+                    "before": {
+                        "start_segment": item.start_segment,
+                        "end_segment": item.end_segment,
+                        "formula_expected": item.formula_expected,
+                    },
+                    "after": {
+                        "start_segment": updated.start_segment,
+                        "end_segment": updated.end_segment,
+                        "formula_expected": updated.formula_expected,
+                    },
+                    "reason": deterministic.reason,
+                    "evidence": list(
+                        decision_evidence_records(
+                            decision=deterministic,
+                            segments=segments,
+                        )
+                    ),
+                }
+            )
+            _log(
+                f"INVENTORY AUTO-EXPAND {item.calculation_id}: "
+                f"S{item.start_segment}-S{item.end_segment} -> "
+                f"S{updated.start_segment}-S{updated.end_segment}"
+            )
+            continue
+
         neighborhood = tuple(
             {
                 "segment_id": index,
@@ -648,7 +696,6 @@ def _run_inventory_evidence_audit(
             }
             for index in range(neighborhood_start, neighborhood_end + 1)
         )
-
         prompt = build_inventory_evidence_audit_prompt(
             item=item,
             neighborhood_segments=neighborhood,
@@ -752,10 +799,11 @@ def _run_inventory_evidence_audit(
                     {
                         "calculation_id": item.calculation_id,
                         "action": "audit_failed",
+                        "decision_source": "model",
                         "selection_reasons": list(selection_reasons),
                         "reason": (
-                            "Bounded evidence audit remained invalid after "
-                            "one repair; original inventory item preserved."
+                            "Segment-ID audit remained invalid after one "
+                            "repair; original inventory item preserved."
                         ),
                         "validation_error": (
                             f"{type(repair_error).__name__}: "
@@ -774,6 +822,7 @@ def _run_inventory_evidence_audit(
             {
                 "calculation_id": item.calculation_id,
                 "action": decision.action.value,
+                "decision_source": "model",
                 "selection_reasons": list(selection_reasons),
                 "before": {
                     "start_segment": item.start_segment,
@@ -786,25 +835,26 @@ def _run_inventory_evidence_audit(
                     "formula_expected": updated.formula_expected,
                 },
                 "reason": decision.reason,
-                "evidence": [
-                    record.to_dict()
-                    for record in decision.evidence
-                ],
+                "evidence": list(
+                    decision_evidence_records(
+                        decision=decision,
+                        segments=segments,
+                    )
+                ),
             }
         )
+
         if decision.action is AuditAction.EXPAND:
             _log(
-                f"INVENTORY EXPAND {item.calculation_id}: "
+                f"INVENTORY MODEL-EXPAND {item.calculation_id}: "
                 f"S{item.start_segment}-S{item.end_segment} -> "
                 f"S{updated.start_segment}-S{updated.end_segment}"
             )
-        elif decision.action is AuditAction.DOWNGRADE_NON_SYMBOLIC:
+        else:
             _log(
                 f"INVENTORY DOWNGRADE {item.calculation_id}: "
                 "formula_expected=false"
             )
-        else:
-            _log(f"INVENTORY KEEP {item.calculation_id}")
 
     return (
         CalculationInventory(
@@ -814,7 +864,6 @@ def _run_inventory_evidence_audit(
         ),
         tuple(audit_records),
     )
-
 
 def run_pipeline(
     *,
@@ -905,7 +954,7 @@ def run_pipeline(
                     "state": "visual_review_required",
                     "formula_ids": [],
                     "reason": (
-                        "The source announces a visual equation; Stage C-D.4B.2 "
+                        "The source announces a visual equation; Stage C-D.4B.2.1 "
                         "does not yet perform frame recovery."
                     ),
                 }
@@ -1161,7 +1210,7 @@ def run_pipeline(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run isolated research pipeline v4.3 Stage C-D.4B.2 diagnostics."
+            "Run isolated research pipeline v4.3 Stage C-D.4B.2.1 diagnostics."
         )
     )
     parser.add_argument("video_id")
