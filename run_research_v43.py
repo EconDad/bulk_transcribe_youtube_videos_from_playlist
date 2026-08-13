@@ -66,7 +66,7 @@ EVIDENCE_AUDIT_PROMPT_VERSION = (
 )
 EXTRACTION_PROMPT_VERSION = "phase4-qwen3-v4.3-extraction-cd.4a"
 ENTAILMENT_PROMPT_VERSION = "phase4-qwen3-v4.3-entailment-cd.4b3.1"
-PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.4b3.1"
+PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.4c"
 ENTAILMENT_INFERENCE_MODE = "direct-json-no-thinking-v1"
 INVENTORY_SYSTEM_PROMPT = (
     "You identify source-grounded calculation events. Return strict JSON. "
@@ -1009,7 +1009,7 @@ def run_pipeline(
                     "state": "visual_review_required",
                     "formula_ids": [],
                     "reason": (
-                        "The source announces a visual equation; Stage C-D.4B.3.1 "
+                        "The source announces a visual equation; Stage C-D.4C "
                         "does not yet perform frame recovery."
                     ),
                 }
@@ -1265,7 +1265,7 @@ def run_pipeline(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run isolated research pipeline v4.3 Stage C-D.4B.3.1 diagnostics."
+            "Run isolated research pipeline v4.3 Stage C-D.4C diagnostics."
         )
     )
     parser.add_argument("video_id")

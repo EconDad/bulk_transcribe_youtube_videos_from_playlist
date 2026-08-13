@@ -8,7 +8,11 @@ import json
 from typing import Any, Mapping, Sequence
 
 from .calculation_inventory import CalculationItem
-from .expression_ast import FormulaCandidate, ExpressionValidationError
+from .expression_ast import (
+    FormulaCandidate,
+    ExpressionValidationError,
+    parse_formula,
+)
 
 
 class FormulaExtractionError(ValueError):
@@ -158,6 +162,81 @@ def build_formula_extraction_repair_prompt(
     )
 
 
+
+def _variable_definition_signature(
+    raw: Mapping[str, Any],
+) -> tuple[str, str]:
+    meaning = raw.get("meaning")
+    unit = raw.get("unit")
+    if not isinstance(meaning, str) or not isinstance(unit, str):
+        return ("", "")
+    return (meaning.strip(), unit.strip())
+
+
+def normalize_formula_candidate_variables(
+    raw_candidate: Mapping[str, Any],
+) -> dict[str, Any]:
+    # Align variable definitions with the candidate's parsed identifiers.
+    # The expression itself is never rewritten.
+    normalized = dict(raw_candidate)
+
+    ascii_formula = raw_candidate.get("ascii")
+    if not isinstance(ascii_formula, str) or not ascii_formula.strip():
+        return normalized
+
+    try:
+        parsed = parse_formula(ascii_formula)
+    except ExpressionValidationError:
+        return normalized
+
+    raw_variables = raw_candidate.get("variables")
+    if (
+        isinstance(raw_variables, (str, bytes))
+        or not isinstance(raw_variables, Sequence)
+    ):
+        return normalized
+
+    required_symbols = parsed.identifiers
+    kept: list[dict[str, Any]] = []
+    seen: dict[str, dict[str, Any]] = {}
+
+    for raw_variable in raw_variables:
+        if not isinstance(raw_variable, Mapping):
+            return normalized
+
+        raw_symbol = raw_variable.get("symbol")
+        if not isinstance(raw_symbol, str):
+            return normalized
+
+        symbol = raw_symbol.strip()
+
+        # Definitions for numeric literals, prose labels, semantic aliases,
+        # and any other symbol absent from the AST are schema-irrelevant.
+        if symbol not in required_symbols:
+            continue
+
+        variable = dict(raw_variable)
+        variable["symbol"] = symbol
+
+        previous = seen.get(symbol)
+        if previous is not None:
+            if (
+                set(previous) == set(variable)
+                and _variable_definition_signature(previous)
+                == _variable_definition_signature(variable)
+            ):
+                continue
+            raise FormulaExtractionError(
+                f"Conflicting duplicate variable definition: {symbol}"
+            )
+
+        seen[symbol] = variable
+        kept.append(variable)
+
+    normalized["variables"] = kept
+    return normalized
+
+
 def parse_formula_extraction_response(
     payload: Mapping[str, Any],
     *,
@@ -218,7 +297,10 @@ def parse_formula_extraction_response(
                 f"candidates[{index}] must be an object"
             )
         try:
-            candidate = FormulaCandidate.from_mapping(raw_candidate)
+            normalized_candidate = normalize_formula_candidate_variables(
+                raw_candidate
+            )
+            candidate = FormulaCandidate.from_mapping(normalized_candidate)
         except ExpressionValidationError as exc:
             raise FormulaExtractionError(
                 f"candidates[{index}] is invalid: {exc}"
