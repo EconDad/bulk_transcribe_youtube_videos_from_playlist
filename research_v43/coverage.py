@@ -110,6 +110,56 @@ class CoverageReport:
         }
 
 
+
+FormulaKey = tuple[str, str]
+
+
+def _formula_key(
+    calculation_id: str,
+    formula_id: str,
+) -> FormulaKey:
+    return (calculation_id, formula_id)
+
+
+def _index_formulas(
+    formulas: Sequence[Mapping[str, Any]],
+    inventory_by_id: Mapping[str, Any],
+) -> dict[FormulaKey, Mapping[str, Any]]:
+    formula_by_key: dict[FormulaKey, Mapping[str, Any]] = {}
+
+    for index, formula in enumerate(formulas):
+        if not isinstance(formula, Mapping):
+            raise CoverageValidationError(
+                f"formulas[{index}] must be an object"
+            )
+
+        formula_id = _require_string(
+            formula.get("formula_id"),
+            f"formulas[{index}].formula_id",
+        )
+        calculation_id = _require_string(
+            formula.get("calculation_id"),
+            f"formulas[{index}].calculation_id",
+        )
+
+        key = _formula_key(calculation_id, formula_id)
+        if key in formula_by_key:
+            raise CoverageValidationError(
+                "Duplicate formula_id within calculation "
+                f"{calculation_id}: {formula_id}"
+            )
+
+        if calculation_id not in inventory_by_id:
+            raise CoverageValidationError(
+                f"Formula {formula_id} references unknown "
+                f"calculation {calculation_id}"
+            )
+
+        formula_by_key[key] = formula
+
+    return formula_by_key
+
+
 def reconcile_coverage(
     *,
     inventory: CalculationInventory,
@@ -144,30 +194,10 @@ def reconcile_coverage(
             )
         resolution_by_id[resolution.calculation_id] = resolution
 
-    formula_by_id: dict[str, Mapping[str, Any]] = {}
-    for index, formula in enumerate(formulas):
-        if not isinstance(formula, Mapping):
-            raise CoverageValidationError(
-                f"formulas[{index}] must be an object"
-            )
-        formula_id = _require_string(
-            formula.get("formula_id"),
-            f"formulas[{index}].formula_id",
-        )
-        calculation_id = _require_string(
-            formula.get("calculation_id"),
-            f"formulas[{index}].calculation_id",
-        )
-        if formula_id in formula_by_id:
-            raise CoverageValidationError(
-                f"Duplicate formula_id: {formula_id}"
-            )
-        if calculation_id not in inventory_by_id:
-            raise CoverageValidationError(
-                f"Formula {formula_id} references unknown "
-                f"calculation {calculation_id}"
-            )
-        formula_by_id[formula_id] = formula
+    formula_by_key = _index_formulas(
+        formulas,
+        inventory_by_id,
+    )
 
     issues: list[str] = []
     ordered_resolutions: list[CoverageResolution] = []
@@ -184,12 +214,35 @@ def reconcile_coverage(
 
         if resolution.state is CoverageState.FORMULA_RETAINED:
             for formula_id in resolution.formula_ids:
-                formula = formula_by_id.get(formula_id)
-                if formula is None:
-                    issues.append(
-                        f"{item.calculation_id} references missing "
-                        f"formula {formula_id}"
+                formula = formula_by_key.get(
+                    _formula_key(
+                        item.calculation_id,
+                        formula_id,
                     )
+                )
+                if formula is None:
+                    other_owners = sorted(
+                        calculation_id
+                        for calculation_id, scoped_formula_id in formula_by_key
+                        if scoped_formula_id == formula_id
+                        and calculation_id != item.calculation_id
+                    )
+                    if len(other_owners) == 1:
+                        issues.append(
+                            f"Formula {formula_id} belongs to "
+                            f"{other_owners[0]}, not {item.calculation_id}"
+                        )
+                    elif other_owners:
+                        issues.append(
+                            f"{item.calculation_id} references missing "
+                            f"formula {formula_id}; that formula_id exists "
+                            f"for calculations {', '.join(other_owners)}"
+                        )
+                    else:
+                        issues.append(
+                            f"{item.calculation_id} references missing "
+                            f"formula {formula_id}"
+                        )
                     continue
                 if formula.get("calculation_id") != item.calculation_id:
                     issues.append(
@@ -222,17 +275,22 @@ def reconcile_coverage(
                 "formula_expected=false"
             )
 
-    referenced_formula_ids = {
-        formula_id
+    referenced_formula_keys = {
+        _formula_key(
+            resolution.calculation_id,
+            formula_id,
+        )
         for resolution in ordered_resolutions
         if resolution.state is CoverageState.FORMULA_RETAINED
         for formula_id in resolution.formula_ids
     }
 
-    for formula_id in sorted(set(formula_by_id) - referenced_formula_ids):
+    for calculation_id, formula_id in sorted(
+        set(formula_by_key) - referenced_formula_keys
+    ):
         issues.append(
-            f"Formula {formula_id} is not referenced by a "
-            "formula_retained resolution"
+            f"Formula {formula_id} for {calculation_id} is not referenced "
+            "by a formula_retained resolution"
         )
 
     counts = {
@@ -254,7 +312,7 @@ def reconcile_coverage(
     return CoverageReport(
         passed=not issues,
         identified_calculations=len(inventory.calculations),
-        formulas_retained=len(referenced_formula_ids),
+        formulas_retained=len(referenced_formula_keys),
         non_symbolic_calculations=counts[
             CoverageState.NON_SYMBOLIC_CALCULATION
         ],
