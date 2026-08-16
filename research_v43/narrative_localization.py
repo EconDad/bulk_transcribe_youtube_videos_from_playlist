@@ -66,6 +66,8 @@ _STOP_WORDS = {
     "your",
 }
 
+_MIN_PRIMARY_TEXT_COVERAGE = 0.40
+
 
 def _segment_text(
     segments: Sequence[Mapping[str, Any]],
@@ -118,21 +120,29 @@ def _validate_proposed_bounds(
 
 def _best_supported_window(
     *,
-    claim_text: str,
+    primary_text: str,
+    numeric_context: str,
     segments: Sequence[Mapping[str, Any]],
     start: int,
     end: int,
     max_segments: int = MAX_CITATION_SEGMENTS,
 ) -> tuple[int, int]:
-    query_words = _words(claim_text)
+    """Find a narrow subwindow supporting the evidence item's core claim.
+
+    Ranking and acceptance are based on the main reader-facing ``text`` field,
+    not topic labels or explanatory boilerplate. Numeric grounding considers
+    the full evidence item so a number cannot disappear during localization.
+    """
+
+    query_words = _words(primary_text)
     query_set = set(query_words)
     if not query_set:
         raise FinalizationError(
-            "Cannot localize narrative citation because the evidence item "
+            "Cannot localize narrative citation because the evidence text "
             "has no content-bearing words"
         )
 
-    claimed_numbers = _numeric_tokens(claim_text)
+    claimed_numbers = _numeric_tokens(numeric_context)
     query_bigrams = {
         (query_words[index], query_words[index + 1])
         for index in range(len(query_words) - 1)
@@ -204,10 +214,11 @@ def _best_supported_window(
             "Best localized narrative citation has insufficient lexical "
             f"support ({best_overlap} matched content words)"
         )
-    if best_coverage < 0.12:
+    if best_coverage < _MIN_PRIMARY_TEXT_COVERAGE:
         raise FinalizationError(
-            "Best localized narrative citation covers too little of the "
-            f"evidence item ({best_coverage:.1%})"
+            "Best localized narrative citation covers too little of the core "
+            f"evidence text ({best_coverage:.1%}; required "
+            f"{_MIN_PRIMARY_TEXT_COVERAGE:.0%})"
         )
     if window_length > max_segments:
         raise AssertionError("Narrative localization exceeded citation limit")
@@ -226,8 +237,8 @@ def localize_narrative_extraction(
     """Localize broad evidence ranges, then run strict Stage F validation.
 
     Narrow model ranges are not changed. A broad range can only shrink within
-    its own proposed bounds. If no narrow window supports both the prose and
-    every claimed numeric token, finalization fails closed.
+    its own proposed bounds. If no narrow window supports the core evidence
+    text and every claimed numeric token, finalization fails closed.
     """
 
     if set(payload) != {"evidence"}:
@@ -282,12 +293,13 @@ def localize_narrative_extraction(
 
         item = dict(raw)
         if end - start + 1 > MAX_CITATION_SEGMENTS:
-            claim_text = " ".join(
+            numeric_context = " ".join(
                 str(raw.get(field) or "")
                 for field in ("topic", "text", "explanation")
             )
             localized_start, localized_end = _best_supported_window(
-                claim_text=claim_text,
+                primary_text=str(raw.get("text") or ""),
+                numeric_context=numeric_context,
                 segments=segments,
                 start=start,
                 end=end,
