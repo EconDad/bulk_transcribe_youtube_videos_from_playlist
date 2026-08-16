@@ -16,12 +16,12 @@ from research_v43.finalization import (
     build_narrative_extraction_prompt,
     build_synthesis_prompt,
     merge_narrative_evidence,
-    parse_narrative_extraction,
     validate_diagnostic_for_finalization,
     validate_synthesis,
     verify_final_package,
     write_final_package,
 )
+from research_v43.narrative_localization import localize_narrative_extraction
 from research_v43.model_client import ModelClientError, OllamaJsonClient
 from run_research_v43 import load_transcript_source
 from youtube_research_analysis import ResearchManifestStore, TranscriptSourcePackage
@@ -113,12 +113,16 @@ def finalize_video(
                 num_predict=num_predict,
                 think=False,
             )
-            parsed = parse_narrative_extraction(
+            repairs: list[str] = []
+            parsed = localize_narrative_extraction(
                 response.payload,
                 segments=segments,
                 minimum_segment=start,
                 maximum_segment=end,
+                on_repair=repairs.append,
             )
+            for repair in repairs:
+                print(f"REPAIR {stage}: {repair}", flush=True)
             extracted.extend(parsed)
             invocations.append(response.invocation.to_dict())
             print(f"PASS {stage}: {len(parsed)} evidence item(s)", flush=True)
