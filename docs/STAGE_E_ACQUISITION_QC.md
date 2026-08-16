@@ -5,7 +5,9 @@ Branch baseline before this note: `5464ed5` (`research-v4.3-stage-cd4c1`)
 
 ## Status
 
-Stage E.1 autonomous source-media acquisition is accepted for embeddable YouTube videos using the `web_embedded` client and yt-dlp's native HTTP downloader. No Stage E production source implementation is included in this checkpoint; this file records the accepted acquisition contract and QC evidence only.
+Stage E.1 autonomous source-media acquisition is accepted for embeddable YouTube videos using the `web_embedded` client and yt-dlp's native HTTP downloader.
+
+Stage E.2 autonomous multi-frame visual transcription is also accepted for the QC target. Seven independently extracted frames all produced the same equation structure with `qwen3-vl:8b-instruct` at temperature 0, with no uncertain tokens. No Stage E production source implementation is included in this checkpoint; this file records the accepted acquisition and visual-consensus contracts and QC evidence only.
 
 ## Historical acquisition replay
 
@@ -36,7 +38,7 @@ The same `mweb` + bgutil PO-token setup was tested without `--download-sections`
 
 Conclusion: the observed failure is not specific to ffmpeg's remote downloader, and successful PO-token generation alone is not sufficient for this target/session.
 
-## Accepted path: `web_embedded` + native HTTP
+## Accepted Stage E.1 path: `web_embedded` + native HTTP
 
 Target video:
 
@@ -64,24 +66,81 @@ Accepted media evidence:
 
 A local ffmpeg seek against the downloaded media at 785.5 seconds succeeded.
 
-Accepted frame evidence:
+Accepted frame evidence from the initial acquisition test:
 
 - timestamp: `785.5` seconds
 - frame SHA-256: `5261173c9e8cbb80d0c7557acf851a8fd611cb1c611c660d410dd76d8ca3c146`
 
-## Production acquisition contract
+## Accepted Stage E.2 multi-frame visual consensus
+
+Cue window:
+
+- S161: `783.630-788.630` — transcript announces the displayed equation.
+- S162: `788.630-793.630` — transcript continues referring to the equation.
+
+Seven frames were extracted independently from the autonomously acquired `web_embedded` source using local ffmpeg with `-nostdin`:
+
+| timestamp | frame SHA-256 |
+|---:|---|
+| 784.0 | `29cae8ae43f01f39dabc7841bfb3314d012bdc8d3b7b506b32d058030b279e9d` |
+| 785.5 | `5261173c9e8cbb80d0c7557acf851a8fd611cb1c611c660d410dd76d8ca3c146` |
+| 787.0 | `2d623901f6b135798ffd7f8e7f6e0e9bd520b111f96a82473f03d124a98df7eb` |
+| 788.5 | `a1d3de683c17e6b42de3361d1e5197a260306f9c2e1b7546e39c5001f05f646b` |
+| 790.0 | `74518b27f8c89f2f7ac1c547b118ef296f6522db04913afee49236920547593d` |
+| 791.5 | `275cef30a205e42085bbe69df513188d1d449de7f908b4aaf2da524f685f9631` |
+| 793.0 | `76394b74cf0f9476b2b81424f7a823dcd600bf66490445fa39090aba2824c795` |
+
+Vision configuration:
+
+- model: `qwen3-vl:8b-instruct`
+- temperature: `0`
+- context: `8192`
+- structured JSON output
+- visual role: literal transcription only
+- no manual/oracle image used as production input
+
+Results:
+
+- frame count: `7`
+- successful vision calls: `7`
+- equation-bearing frames: `7`
+- uncertain-token lists: empty for all 7 frames
+- model-reported confidence: `1.0` for all 7 frames
+- normalized ASCII groups: exactly one group with count `7`
+
+Every frame returned the same ASCII transcription:
+
+```text
+B_0 = C/2 * [1 - (1 + YTM/2)^(-2t)] / (YTM/2) + F / (1 + YTM/2)^(2t)
+```
+
+Every frame returned the same LaTeX mathematical tree:
+
+```tex
+B_{0} = \frac{C}{2} \left[\frac{1 - \left(1+\frac{\text{YTM}}{2}\right)^{-2t}}{\frac{\text{YTM}}{2}}\right] + \frac{F}{\left(1+\frac{\text{YTM}}{2}\right)^{2t}}
+```
+
+The seven-frame agreement exceeds the provisional acceptance threshold of at least three independent equation-bearing frames preserving the same fraction nesting, additive terms, exponent signs, and denominator placement.
+
+Important: model-reported confidence is recorded as provenance but is not itself an acceptance criterion. Production acceptance must be deterministic: parser-safe normalization, successful shared-AST parsing, and cross-frame structural agreement.
+
+## Production acquisition and visual-consensus contract
 
 For Stage E visual-equation recovery:
 
 1. Resolve the visual cue window from transcript evidence.
 2. Attempt `web_embedded` acquisition using yt-dlp native HTTP and a video-only format bounded to at most 1080p.
 3. Persist source-media metadata and SHA-256 while the temporary media exists.
-4. Extract only the bounded cue frames locally with ffmpeg.
+4. Extract bounded cue frames locally with ffmpeg using `-nostdin`.
 5. Record frame timestamps and SHA-256 hashes.
-6. Run visual transcription independently per frame.
-7. Normalize visual transcription separately from raw evidence, then validate through the shared safe AST parser and cross-frame structural agreement.
-8. Delete temporary full source media after accepted provenance is written.
-9. If the video is not embeddable or acquisition otherwise fails, fail closed to `visual_review_required` until another acquisition backend is explicitly accepted.
+6. Run literal visual transcription independently per frame with `qwen3-vl:8b-instruct`, temperature 0, concurrency 1.
+7. Preserve the raw ASCII and LaTeX transcription for each frame immutably.
+8. Normalize parser syntax into a separate field without silently modifying the raw visual evidence.
+9. Parse normalized expressions with the shared safe AST parser.
+10. Compare canonical AST structure across independently extracted frames.
+11. Accept a visual formula only when the configured minimum number of independent frames agree structurally and all other deterministic validation gates pass.
+12. Delete temporary full source media after accepted provenance is written.
+13. If the video is not embeddable, acquisition fails, too few equation-bearing frames exist, parsing fails, or structural consensus is absent, fail closed to `visual_review_required`.
 
 Do not silently fall back to the rejected `android_vr` or `mweb` paths.
 
@@ -90,6 +149,7 @@ Do not silently fall back to the rejected `android_vr` or `mweb` paths.
 The Stage E package should record at minimum:
 
 - source URL and video ID
+- calculation ID
 - cue transcript segment IDs and start/end timestamps
 - yt-dlp version
 - selected YouTube client
@@ -98,13 +158,15 @@ The Stage E package should record at minimum:
 - source-media SHA-256
 - frame timestamps and SHA-256 hashes
 - vision model and model version/tag
-- raw per-frame visual transcription
+- raw per-frame ASCII and LaTeX visual transcription
+- uncertain tokens and model-reported confidence
 - parser-safe normalized transcription as a distinct field
-- cross-frame consensus result
+- parse result and canonical AST identity per frame
+- cross-frame consensus group/count and required threshold
 - final acceptance/review reason
 
-## Stage E.2 state
+## Next implementation stage
 
-A first autonomous multi-frame extraction command was started after acceptance of `web_embedded`, but the pasted shell block became corrupted during execution. Seven local frames were extracted, but the command terminated before the vision-consensus phase completed. Therefore Stage E.2 is **not accepted** by this checkpoint and those partial outputs are not treated as authoritative evidence.
+Stage E.1 and E.2 QC are accepted and frozen as behavioral requirements. The next implementation stage is to add the generalized production Stage E module and tests, integrate it with `CALC` entries marked `visual_equation_cue=true`, emit `visual_evidence.json`, and route accepted visual formulas into the existing shared AST/formula/coverage pipeline.
 
-The frozen source checkpoint remains the v4.3 C-D.4C.1 implementation; this documentation commit records only the accepted Stage E.1 acquisition behavior and does not modify production research code.
+The v4.3 C-D.4C.1 source implementation remains the last frozen pre-Stage-E code checkpoint. This documentation checkpoint records accepted Stage E behavior but does not yet modify production research code.
