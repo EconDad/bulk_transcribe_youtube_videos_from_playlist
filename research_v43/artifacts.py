@@ -28,6 +28,7 @@ _REQUIRED_PAYLOADS = {
 
 _OPTIONAL_PAYLOADS = {
     "inventory_audit.json",
+    "visual_evidence.json",
 }
 
 

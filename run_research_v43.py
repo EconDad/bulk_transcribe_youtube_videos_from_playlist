@@ -57,6 +57,10 @@ from research_v43.inventory_evidence_audit import (
     parse_inventory_evidence_audit_response,
 )
 from research_v43.model_client import ModelClientError, OllamaJsonClient
+from research_v43.visual_evidence import (
+    VisualEquationRecoverer,
+    VisualRecoveryConfig,
+)
 
 
 PROMPT_VERSION = "phase4-qwen3-v4.3-stage-cd.1"
@@ -66,7 +70,7 @@ EVIDENCE_AUDIT_PROMPT_VERSION = (
 )
 EXTRACTION_PROMPT_VERSION = "phase4-qwen3-v4.3-extraction-cd.4a"
 ENTAILMENT_PROMPT_VERSION = "phase4-qwen3-v4.3-entailment-cd.4b3.1"
-PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-cd.4c.1"
+PACKAGE_VERSION = "phase4-qwen3-v4.3-stage-e.3"
 ENTAILMENT_INFERENCE_MODE = "direct-json-no-thinking-v1"
 INVENTORY_SYSTEM_PROMPT = (
     "You identify source-grounded calculation events. Return strict JSON. "
@@ -908,6 +912,7 @@ def run_pipeline(
     inventory_num_predict: int = 1536,
     detail_num_predict: int = 1536,
     resume: bool = True,
+    visual_recoverer: Any | None = None,
 ) -> tuple[int, Path]:
     segments, source_sha, source_metadata = load_transcript_source(
         raw_root=raw_root,
@@ -963,6 +968,7 @@ def run_pipeline(
     entailment_reports: list[dict[str, Any]] = []
     rejected_formulas: list[dict[str, Any]] = []
     resolutions: list[dict[str, Any]] = []
+    visual_evidence_records: list[dict[str, Any]] = []
 
     for item in inventory.calculations:
         audit_failure = audit_failures.get(item.calculation_id)
@@ -1003,16 +1009,98 @@ def run_pipeline(
             continue
 
         if item.visual_equation_cue:
+            if visual_recoverer is None:
+                reason = (
+                    "The source announces a visual equation, but autonomous "
+                    "visual recovery is not enabled for this invocation."
+                )
+                visual_evidence_records.append(
+                    {
+                        "schema_version": "1.0",
+                        "calculation_id": item.calculation_id,
+                        "status": "visual_review_required",
+                        "failure_stage": "visual_recovery_disabled",
+                        "reason": reason,
+                    }
+                )
+                resolutions.append(
+                    {
+                        "calculation_id": item.calculation_id,
+                        "state": "visual_review_required",
+                        "formula_ids": [],
+                        "reason": reason,
+                    }
+                )
+                continue
+
+            _log(
+                f"START visual_recovery {item.calculation_id} "
+                f"S{item.start_segment}-S{item.end_segment}"
+            )
+            try:
+                visual_result = visual_recoverer.recover(
+                    video_id=video_id,
+                    item=item,
+                    segments=segments,
+                    source_metadata=source_metadata,
+                )
+            except Exception as exc:
+                reason = (
+                    "Autonomous visual recovery failed closed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                visual_evidence_records.append(
+                    {
+                        "schema_version": "1.0",
+                        "calculation_id": item.calculation_id,
+                        "status": "visual_review_required",
+                        "failure_stage": "visual_recovery_exception",
+                        "reason": reason,
+                    }
+                )
+                resolutions.append(
+                    {
+                        "calculation_id": item.calculation_id,
+                        "state": "visual_review_required",
+                        "formula_ids": [],
+                        "reason": reason,
+                    }
+                )
+                _log(f"REVIEW visual_recovery {item.calculation_id}: {reason}")
+                continue
+
+            visual_evidence_records.append(dict(visual_result.evidence))
+            if visual_result.candidate is None:
+                resolutions.append(
+                    {
+                        "calculation_id": item.calculation_id,
+                        "state": "visual_review_required",
+                        "formula_ids": [],
+                        "reason": visual_result.reason,
+                    }
+                )
+                _log(
+                    f"REVIEW visual_recovery {item.calculation_id}: "
+                    f"{visual_result.reason}"
+                )
+                continue
+
+            retained_formulas.append(visual_result.candidate.to_dict())
             resolutions.append(
                 {
                     "calculation_id": item.calculation_id,
-                    "state": "visual_review_required",
-                    "formula_ids": [],
+                    "state": "formula_retained",
+                    "formula_ids": [visual_result.candidate.formula_id],
                     "reason": (
-                        "The source announces a visual equation; Stage C-D.4C.1 "
-                        "does not yet perform frame recovery."
+                        "Visual formula passed autonomous source-frame "
+                        "acquisition, shared-parser validation, and "
+                        "cross-frame AST consensus."
                     ),
                 }
+            )
+            _log(
+                f"RETAIN visual_recovery {item.calculation_id}/"
+                f"{visual_result.candidate.formula_id}: {visual_result.reason}"
             )
             continue
 
@@ -1224,6 +1312,11 @@ def run_pipeline(
             "audit_version": INVENTORY_AUDIT_VERSION,
             "records": list(inventory_audit_records),
         },
+        "visual_evidence.json": {
+            "schema_version": "1.0",
+            "video_id": video_id,
+            "records": visual_evidence_records,
+        },
         "formulas.json": {
             "schema_version": "1.0",
             "video_id": video_id,
@@ -1336,6 +1429,36 @@ def build_parser() -> argparse.ArgumentParser:
             os.environ.get("V43_INVENTORY_NUM_PREDICT", "1536")
         ),
     )
+    parser.add_argument(
+        "--vision-model",
+        default=os.environ.get("OLLAMA_VISION_MODEL", "qwen3-vl:8b-instruct"),
+    )
+    parser.add_argument(
+        "--visual-frame-count",
+        type=int,
+        default=int(os.environ.get("V43_VISUAL_FRAME_COUNT", "7")),
+    )
+    parser.add_argument(
+        "--visual-min-consensus",
+        type=int,
+        default=int(os.environ.get("V43_VISUAL_MIN_CONSENSUS", "3")),
+    )
+    parser.add_argument(
+        "--yt-dlp-path",
+        default=os.environ.get(
+            "V43_YTDLP_PATH", str(Path(sys.executable).with_name("yt-dlp"))
+        ),
+    )
+    parser.add_argument(
+        "--deno-path",
+        default=os.environ.get(
+            "V43_DENO_PATH", str(Path.home() / ".deno" / "bin" / "deno")
+        ),
+    )
+    parser.add_argument(
+        "--ffmpeg-path", default=os.environ.get("V43_FFMPEG_PATH", "ffmpeg")
+    )
+    parser.add_argument("--no-visual-recovery", action="store_true")
     parser.add_argument("--no-resume", action="store_true")
     return parser
 
@@ -1351,6 +1474,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         num_predict=args.num_predict,
         keep_alive=args.keep_alive,
     )
+    visual_recoverer = None
+    if not args.no_visual_recovery:
+        visual_recoverer = VisualEquationRecoverer(
+            VisualRecoveryConfig(
+                host=args.host,
+                model=args.vision_model,
+                num_ctx=args.num_ctx,
+                num_predict=args.num_predict,
+                timeout_seconds=max(args.timeout, 600.0),
+                yt_dlp_path=args.yt_dlp_path,
+                deno_path=args.deno_path,
+                ffmpeg_path=args.ffmpeg_path,
+                frame_count=args.visual_frame_count,
+                min_consensus=args.visual_min_consensus,
+            ),
+            logger=_log,
+        )
+
     try:
         exit_code, package = run_pipeline(
             video_id=args.video_id,
@@ -1363,6 +1504,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             inventory_num_predict=args.inventory_num_predict,
             detail_num_predict=args.num_predict,
             resume=not args.no_resume,
+            visual_recoverer=visual_recoverer,
         )
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
