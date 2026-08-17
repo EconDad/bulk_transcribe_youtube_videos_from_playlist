@@ -21,7 +21,7 @@ from research_v43.finalization import (
     verify_final_package,
     write_final_package,
 )
-from research_v43.narrative_localization import localize_narrative_extraction
+from research_v43.narrative_recovery import recover_narrative_extraction
 from research_v43.model_client import ModelClientError, OllamaJsonClient
 from run_research_v43 import load_transcript_source
 from youtube_research_analysis import ResearchManifestStore, TranscriptSourcePackage
@@ -114,15 +114,19 @@ def finalize_video(
                 think=False,
             )
             repairs: list[str] = []
-            parsed = localize_narrative_extraction(
+            rejections: list[str] = []
+            parsed = recover_narrative_extraction(
                 response.payload,
                 segments=segments,
                 minimum_segment=start,
                 maximum_segment=end,
                 on_repair=repairs.append,
+                on_reject=rejections.append,
             )
             for repair in repairs:
                 print(f"REPAIR {stage}: {repair}", flush=True)
+            for rejection in rejections:
+                print(f"REJECT {stage}: {rejection}", flush=True)
             extracted.extend(parsed)
             invocations.append(response.invocation.to_dict())
             print(f"PASS {stage}: {len(parsed)} evidence item(s)", flush=True)
