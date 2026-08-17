@@ -172,7 +172,7 @@ class SemanticRecoveryTests(unittest.TestCase):
         )
 
         symbols = {
-            variable.symbol
+            variable["symbol"]
             for variable in parsed.candidates[0].variables
         }
         self.assertEqual(symbols, {"ratio", "spending", "money_spent"})
