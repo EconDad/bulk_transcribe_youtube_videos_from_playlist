@@ -17,11 +17,11 @@ from research_v43.finalization import (
     build_synthesis_prompt,
     merge_narrative_evidence,
     validate_diagnostic_for_finalization,
-    validate_synthesis,
     verify_final_package,
     write_final_package,
 )
 from research_v43.narrative_recovery import recover_narrative_extraction
+from research_v43.synthesis_recovery import recover_synthesis
 from research_v43.model_client import ModelClientError, OllamaJsonClient
 from run_research_v43 import load_transcript_source
 from youtube_research_analysis import ResearchManifestStore, TranscriptSourcePackage
@@ -150,16 +150,20 @@ def finalize_video(
                 think=False,
             )
             invocations.append(response.invocation.to_dict())
+            repairs: list[str] = []
             try:
-                narrative = validate_synthesis(
+                narrative = recover_synthesis(
                     response.payload,
                     evidence=evidence,
                     segments=segments,
+                    on_repair=repairs.append,
                 )
             except FinalizationError as exc:
                 last_error = exc
                 print(f"RETRY {stage}: {exc}", flush=True)
                 continue
+            for repair in repairs:
+                print(f"REPAIR {stage}: {repair}", flush=True)
             print(f"PASS {stage}", flush=True)
             break
         if narrative is None:
