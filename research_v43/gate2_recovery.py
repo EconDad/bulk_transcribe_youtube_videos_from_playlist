@@ -70,6 +70,17 @@ def _is_numeric_variable(value: str) -> bool:
     return not re.search(r"[A-Za-z]", remainder)
 
 
+def _normalize_numeric_literal(value: str) -> str:
+    return re.sub(r"[\s,$€£]", "", str(value)).casefold()
+
+
+def _numeric_literals(value: str) -> set[str]:
+    return {
+        _normalize_numeric_literal(match)
+        for match in _NUMBER_RE.findall(str(value))
+    }
+
+
 def _canonical_operations(item: CalculationItem) -> tuple[str, ...]:
     return tuple(
         operation
@@ -91,8 +102,12 @@ def _compact_numeric_example_without_joint_operation(
     This is intentionally stricter than merely seeing an operation somewhere
     nearby. It requires all inventory variables to be numeric literals and asks
     whether those exact literals plus every canonical operation can be grounded
-    in one short contiguous source window. If not, the event is treated as a
-    worked numeric instance rather than a reusable symbolic formula.
+    in one short contiguous source window. A window containing competing numeric
+    operands is not accepted merely because the target literals happen to occur
+    nearby; at most one extra numeric value is allowed, and only when the same
+    window explicitly presents a result. If no such compact association exists,
+    the event is treated as a worked numeric instance rather than a reusable
+    symbolic formula.
     """
 
     if not item.variables_mentioned or not all(
@@ -114,6 +129,10 @@ def _compact_numeric_example_without_joint_operation(
     if _EXAMPLE_CUE_RE.search(context_text) is None:
         return False
 
+    target_numbers: set[str] = set()
+    for variable in item.variables_mentioned:
+        target_numbers.update(_numeric_literals(variable))
+
     for start in range(context_start, context_end + 1):
         for end in range(
             start,
@@ -130,7 +149,21 @@ def _compact_numeric_example_without_joint_operation(
                 for operation in operations
             ):
                 continue
-            return False
+
+            window_numbers = _numeric_literals(text)
+            extra_numbers = window_numbers - target_numbers
+            if not extra_numbers:
+                return False
+
+            # One extra number may be the explicitly stated result of the
+            # operation. More than one extra number makes operand association
+            # ambiguous, so the compact window cannot prove that the operation
+            # applies to the inventory's exact numeric variables.
+            if (
+                len(extra_numbers) == 1
+                and _RESULT_CUE_RE.search(text) is not None
+            ):
+                return False
 
     item_text = _segment_text(
         segments,
