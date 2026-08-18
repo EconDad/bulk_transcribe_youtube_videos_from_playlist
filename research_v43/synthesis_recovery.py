@@ -125,7 +125,9 @@ def _best_grounded_subset(
     best: tuple[tuple[int, float, int, tuple[int, ...]], list[str]] | None = None
 
     # Search only subsets of the model's own citations. Prefer stronger lexical
-    # support and, on ties, more retained citations and earlier original IDs.
+    # support and, on ties, the smallest sufficient citation set, then earlier
+    # original IDs. Extra citations are not retained merely because capacity
+    # remains under the schema maximum.
     for size in range(1, maximum + 1):
         for indexes in combinations(range(len(ids)), size):
             subset = [ids[index] for index in indexes]
@@ -151,7 +153,7 @@ def _best_grounded_subset(
             score = (
                 overlap,
                 coverage,
-                size,
+                -size,
                 tuple(-index for index in indexes),
             )
             if best is None or score > best[0]:
