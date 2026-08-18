@@ -9,39 +9,44 @@ domain-neutral recoveries proven useful by real-video integration:
   source lacks a reusable arithmetic operation;
 - downgrade incomplete arithmetic antecedents when the source never grounds a
   result concept, avoiding invented left-hand variables;
+- downgrade numeric outcomes whose full bounded source still lacks a reusable
+  symbolic relationship;
+- allow deterministic inventory expansion across the already-bounded audit
+  neighborhood;
 - complete missing formula variable metadata without changing expressions;
-- widen node operation evidence only to the hull of already-cited groundings
-  inside the validated calculation span.
+- widen node operation evidence only to the hull of already-cited groundings;
+- localize paraphrased entailment quotes to exact text inside unchanged cited
+  ranges before rerunning strict validation.
 """
 
 from __future__ import annotations
 
 import run_research_v43 as base
 
+from research_v43.gate2_recovery import (
+    audit_with_gate2_semantic_downgrades,
+    find_deterministic_expansion_gate2,
+    validate_entailment_response_with_gate2_quote_repair,
+)
 from research_v43.inventory_recovery import (
     AdaptiveInventoryOllamaClient,
     parse_inventory_response_with_order_repair,
 )
-from research_v43.operation_fragment_recovery import (
-    audit_with_incomplete_operation_fragment_downgrade,
-)
 from research_v43.semantic_recovery import (
     parse_formula_extraction_response_with_variable_completion,
-    validate_entailment_response_with_grounding_hull_repair,
 )
 
 
 def main(argv=None) -> int:
     base.OllamaJsonClient = AdaptiveInventoryOllamaClient
     base.parse_inventory_response = parse_inventory_response_with_order_repair
-    base.audit_visual_equation_cues = (
-        audit_with_incomplete_operation_fragment_downgrade
-    )
+    base.audit_visual_equation_cues = audit_with_gate2_semantic_downgrades
+    base.find_deterministic_expansion = find_deterministic_expansion_gate2
     base.parse_formula_extraction_response = (
         parse_formula_extraction_response_with_variable_completion
     )
     base.validate_entailment_response = (
-        validate_entailment_response_with_grounding_hull_repair
+        validate_entailment_response_with_gate2_quote_repair
     )
     return base.main(argv)
 
