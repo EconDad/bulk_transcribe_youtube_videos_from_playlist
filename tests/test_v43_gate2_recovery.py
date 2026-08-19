@@ -39,14 +39,14 @@ class Gate2RecoveryTests(unittest.TestCase):
             reason="Synthetic source-grounded event.",
         )
 
-    def test_numeric_instance_without_joint_operation_is_downgraded(self):
+    def test_numeric_instance_without_local_operand_operation_binding_is_downgraded(self):
         segments = [
             {"text": "For example, divide 50 by 1000."},
             {"text": "Now let's say the price is 800."},
             {"text": "The result is 6.3 percent."},
         ]
         item = self._item(
-            start=2,
+            start=0,
             end=2,
             variables=("50", "800"),
             operations=("division",),
@@ -104,12 +104,12 @@ class Gate2RecoveryTests(unittest.TestCase):
 
     def test_coherent_numeric_subtraction_example_is_preserved(self):
         segments = [
-            {"text": "Let's say you paid 1200 for the bond."},
-            {"text": "At maturity you only get 1000 back."},
+            {"text": "Let's say you paid 1200 for the item."},
+            {"text": "At the end you only get 1000 back."},
             {"text": "So you lose 200."},
         ]
         item = self._item(
-            start=2,
+            start=0,
             end=2,
             variables=("1200", "1000"),
             operations=("subtraction",),
@@ -127,6 +127,38 @@ class Gate2RecoveryTests(unittest.TestCase):
 
         self.assertTrue(audited.calculations[0].formula_expected)
         self.assertFalse(
+            any(
+                record.get("action")
+                == "downgrade_non_symbolic_numeric_instance"
+                for record in records
+            )
+        )
+
+    def test_matching_number_without_local_operation_cue_does_not_preserve(self):
+        segments = [
+            {"text": "For example, divide 50 by 1000."},
+            {"text": "Suppose another input is 800."},
+            {"text": "The reported result is 6.3 percent."},
+        ]
+        item = self._item(
+            start=0,
+            end=2,
+            variables=("50", "800"),
+            operations=("division",),
+        )
+        inventory = CalculationInventory(
+            schema_version="1.0",
+            video_id="video",
+            calculations=(item,),
+        )
+
+        audited, records = audit_with_gate2_semantic_downgrades(
+            inventory=inventory,
+            segments=segments,
+        )
+
+        self.assertFalse(audited.calculations[0].formula_expected)
+        self.assertTrue(
             any(
                 record.get("action")
                 == "downgrade_non_symbolic_numeric_instance"
