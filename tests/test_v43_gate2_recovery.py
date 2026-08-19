@@ -102,6 +102,38 @@ class Gate2RecoveryTests(unittest.TestCase):
             )
         )
 
+    def test_coherent_numeric_subtraction_example_is_preserved(self):
+        segments = [
+            {"text": "Let's say you paid 1200 for the bond."},
+            {"text": "At maturity you only get 1000 back."},
+            {"text": "So you lose 200."},
+        ]
+        item = self._item(
+            start=2,
+            end=2,
+            variables=("1200", "1000"),
+            operations=("subtraction",),
+        )
+        inventory = CalculationInventory(
+            schema_version="1.0",
+            video_id="video",
+            calculations=(item,),
+        )
+
+        audited, records = audit_with_gate2_semantic_downgrades(
+            inventory=inventory,
+            segments=segments,
+        )
+
+        self.assertTrue(audited.calculations[0].formula_expected)
+        self.assertFalse(
+            any(
+                record.get("action")
+                == "downgrade_non_symbolic_numeric_instance"
+                for record in records
+            )
+        )
+
     def test_bounded_expansion_can_use_full_audit_neighborhood(self):
         segments = [
             {"text": "The face value is 1000."},
