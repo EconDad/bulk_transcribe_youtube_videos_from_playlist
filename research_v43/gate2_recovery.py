@@ -41,6 +41,12 @@ _RESULT_CUE_RE = re.compile(
     r"is|are|equals?|gets?|gives?|yields?|makes?|difference|total|yield)\b",
     re.IGNORECASE,
 )
+_EXPLICIT_RESULT_CUE_RE = re.compile(
+    r"\b(?:result(?:s)?(?:\s+(?:is|are|equals?))?|amounts?\s+to|"
+    r"comes?\s+to|equals?|gets?|gives?|yields?|makes?|"
+    r"difference(?:\s+of)?|total(?:\s+of)?)\b",
+    re.IGNORECASE,
+)
 _EXAMPLE_CUE_RE = re.compile(
     r"\b(?:for example|example|suppose|let(?:'s| us) say|assume|scenario)\b",
     re.IGNORECASE,
@@ -105,9 +111,10 @@ def _compact_numeric_example_without_joint_operation(
     in one short contiguous source window. A window containing competing numeric
     operands is not accepted merely because the target literals happen to occur
     nearby; at most one extra numeric value is allowed, and only when the same
-    window explicitly presents a result. If no such compact association exists,
-    the event is treated as a worked numeric instance rather than a reusable
-    symbolic formula.
+    window explicitly presents it as a result. If the inventory's numeric
+    operands do not appear anywhere in the bounded context, the event is left
+    to the more general outcome-only classifier rather than being called a
+    worked instance.
     """
 
     if not item.variables_mentioned or not all(
@@ -133,6 +140,10 @@ def _compact_numeric_example_without_joint_operation(
     for variable in item.variables_mentioned:
         target_numbers.update(_numeric_literals(variable))
 
+    context_numbers = _numeric_literals(context_text)
+    if not target_numbers or not target_numbers.issubset(context_numbers):
+        return False
+
     for start in range(context_start, context_end + 1):
         for end in range(
             start,
@@ -156,12 +167,11 @@ def _compact_numeric_example_without_joint_operation(
                 return False
 
             # One extra number may be the explicitly stated result of the
-            # operation. More than one extra number makes operand association
-            # ambiguous, so the compact window cannot prove that the operation
-            # applies to the inventory's exact numeric variables.
+            # operation. Generic copulas such as "price is 800" are not enough
+            # to prove that the extra value is the result of this arithmetic.
             if (
                 len(extra_numbers) == 1
-                and _RESULT_CUE_RE.search(text) is not None
+                and _EXPLICIT_RESULT_CUE_RE.search(text) is not None
             ):
                 return False
 
