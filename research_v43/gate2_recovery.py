@@ -41,12 +41,6 @@ _RESULT_CUE_RE = re.compile(
     r"is|are|equals?|gets?|gives?|yields?|makes?|difference|total|yield)\b",
     re.IGNORECASE,
 )
-_EXPLICIT_RESULT_CUE_RE = re.compile(
-    r"\b(?:result(?:s)?(?:\s+(?:is|are|equals?))?|amounts?\s+to|"
-    r"comes?\s+to|equals?|gets?|gives?|yields?|makes?|"
-    r"difference(?:\s+of)?|total(?:\s+of)?)\b",
-    re.IGNORECASE,
-)
 _EXAMPLE_CUE_RE = re.compile(
     r"\b(?:for example|example|suppose|let(?:'s| us) say|assume|scenario)\b",
     re.IGNORECASE,
@@ -102,8 +96,16 @@ def _numeric_value(value: str) -> tuple[float, bool] | None:
 
 
 def _approximately_equal(observed: float, expected: float) -> bool:
-    scale = max(abs(observed), abs(expected), 1.0)
+    scale = max(abs(observed), abs(expected), 1e-12)
     return abs(observed - expected) <= max(1e-9, scale * 0.01)
+
+
+def _canonical_operations(item: CalculationItem) -> tuple[str, ...]:
+    return tuple(
+        operation
+        for operation in item.operations_mentioned
+        if operation in _OPERATION_CUES
+    )
 
 
 def _matches_arithmetic_result(
@@ -113,10 +115,9 @@ def _matches_arithmetic_result(
 ) -> bool:
     """Check one extra numeric value against one simple inventory operation.
 
-    This does not infer a formula. It only prevents downgrading a compact worked
-    example when the source numbers themselves verify the inventory's already
-    claimed arithmetic operation. The check is limited to one binary operation
-    and two numeric inventory variables.
+    This does not infer a formula. It only verifies whether a source number can
+    be the result of the inventory's already-claimed arithmetic operation. The
+    check is limited to one binary operation and two numeric inventory values.
     """
 
     operations = _canonical_operations(item)
@@ -171,12 +172,41 @@ def _matches_arithmetic_result(
     )
 
 
-def _canonical_operations(item: CalculationItem) -> tuple[str, ...]:
-    return tuple(
-        operation
-        for operation in item.operations_mentioned
-        if operation in _OPERATION_CUES
-    )
+def _window_has_local_operation_result_anchor(
+    *,
+    item: CalculationItem,
+    segments: Sequence[Mapping[str, Any]],
+    start: int,
+    end: int,
+    target_numbers: set[str],
+) -> bool:
+    """Require the arithmetic cue and matching result to share a segment.
+
+    Numeric coincidence elsewhere in a broad example is not enough. This is the
+    key association guard: a matching result preserves the calculation only when
+    the source locally ties that value to the inventory's arithmetic operation.
+    """
+
+    operations = _canonical_operations(item)
+    if len(operations) != 1:
+        return False
+
+    operation = operations[0]
+    for index in range(start, end + 1):
+        text = _segment_text(segments, index, index)
+        if not _has_operation_cue(operation, text):
+            continue
+        extras = _numeric_literals(text) - target_numbers
+        if any(
+            _matches_arithmetic_result(
+                item=item,
+                extra_literal=extra,
+            )
+            for extra in extras
+        ):
+            return True
+
+    return False
 
 
 def _compact_numeric_example_without_joint_operation(
@@ -187,18 +217,15 @@ def _compact_numeric_example_without_joint_operation(
     lookahead_segments: int = 2,
     max_joint_window: int = 4,
 ) -> bool:
-    """Detect a numeric instance whose specific operands are not jointly stated.
+    """Detect a numeric instance whose operands are not bound to its operation.
 
-    This is intentionally stricter than merely seeing an operation somewhere
-    nearby. It requires all inventory variables to be numeric literals and asks
-    whether those exact literals plus every canonical operation can be grounded
-    in one short contiguous source window. A window containing competing numeric
-    operands is not accepted merely because the target literals happen to occur
-    nearby. One extra numeric value may preserve the event when it is explicitly
-    presented as the result or mechanically verifies the already-claimed simple
-    arithmetic operation. If the inventory's numeric operands do not appear
-    anywhere in the bounded context, the event is left to the more general
-    outcome-only classifier rather than being called a worked instance.
+    Nearby arithmetic from a different worked example must not bind numeric
+    operands merely because all values occur somewhere in one inventory span.
+    A reusable numeric example is preserved only when a short window inside the
+    inventory's own span either states the exact operands with the operation and
+    no competing numeric values, or contains a matching arithmetic result in the
+    same segment as the operation cue. Broader context is used only to establish
+    that this is an example-like passage, never to create operand association.
     """
 
     if not item.variables_mentioned or not all(
@@ -224,14 +251,19 @@ def _compact_numeric_example_without_joint_operation(
     for variable in item.variables_mentioned:
         target_numbers.update(_numeric_literals(variable))
 
-    context_numbers = _numeric_literals(context_text)
-    if not target_numbers or not target_numbers.issubset(context_numbers):
+    item_text = _segment_text(
+        segments,
+        item.start_segment,
+        item.end_segment,
+    )
+    item_numbers = _numeric_literals(item_text)
+    if not target_numbers or not target_numbers.issubset(item_numbers):
         return False
 
-    for start in range(context_start, context_end + 1):
+    for start in range(item.start_segment, item.end_segment + 1):
         for end in range(
             start,
-            min(context_end, start + max_joint_window - 1) + 1,
+            min(item.end_segment, start + max_joint_window - 1) + 1,
         ):
             text = _segment_text(segments, start, end)
             if not all(
@@ -250,21 +282,15 @@ def _compact_numeric_example_without_joint_operation(
             if not extra_numbers:
                 return False
 
-            if len(extra_numbers) == 1:
-                extra_literal = next(iter(extra_numbers))
-                if _EXPLICIT_RESULT_CUE_RE.search(text) is not None:
-                    return False
-                if _matches_arithmetic_result(
-                    item=item,
-                    extra_literal=extra_literal,
-                ):
-                    return False
+            if _window_has_local_operation_result_anchor(
+                item=item,
+                segments=segments,
+                start=start,
+                end=end,
+                target_numbers=target_numbers,
+            ):
+                return False
 
-    item_text = _segment_text(
-        segments,
-        item.start_segment,
-        item.end_segment,
-    )
     return bool(_NUMBER_RE.search(item_text) and _RESULT_CUE_RE.search(item_text))
 
 
