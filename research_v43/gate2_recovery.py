@@ -87,6 +87,90 @@ def _numeric_literals(value: str) -> set[str]:
     }
 
 
+def _numeric_value(value: str) -> tuple[float, bool] | None:
+    matches = _NUMBER_RE.findall(str(value))
+    if len(matches) != 1:
+        return None
+    raw = _normalize_numeric_literal(matches[0])
+    is_percent = raw.endswith("%")
+    if is_percent:
+        raw = raw[:-1]
+    try:
+        return float(raw), is_percent
+    except ValueError:
+        return None
+
+
+def _approximately_equal(observed: float, expected: float) -> bool:
+    scale = max(abs(observed), abs(expected), 1.0)
+    return abs(observed - expected) <= max(1e-9, scale * 0.01)
+
+
+def _matches_arithmetic_result(
+    *,
+    item: CalculationItem,
+    extra_literal: str,
+) -> bool:
+    """Check one extra numeric value against one simple inventory operation.
+
+    This does not infer a formula. It only prevents downgrading a compact worked
+    example when the source numbers themselves verify the inventory's already
+    claimed arithmetic operation. The check is limited to one binary operation
+    and two numeric inventory variables.
+    """
+
+    operations = _canonical_operations(item)
+    if len(operations) != 1 or len(item.variables_mentioned) != 2:
+        return False
+
+    left = _numeric_value(item.variables_mentioned[0])
+    right = _numeric_value(item.variables_mentioned[1])
+    observed = _numeric_value(extra_literal)
+    if left is None or right is None or observed is None:
+        return False
+
+    left_value, left_percent = left
+    right_value, right_percent = right
+    observed_value, observed_percent = observed
+    if left_percent:
+        left_value /= 100.0
+    if right_percent:
+        right_value /= 100.0
+
+    operation = operations[0]
+    expected_values: list[float] = []
+
+    if operation == "addition":
+        expected_values.append(left_value + right_value)
+    elif operation == "subtraction":
+        expected_values.extend(
+            [
+                left_value - right_value,
+                right_value - left_value,
+                abs(left_value - right_value),
+            ]
+        )
+    elif operation == "multiplication":
+        expected_values.append(left_value * right_value)
+    elif operation == "division":
+        if right_value != 0:
+            expected_values.append(left_value / right_value)
+        if left_value != 0:
+            expected_values.append(right_value / left_value)
+    else:
+        return False
+
+    observed_candidates = [observed_value]
+    if observed_percent:
+        observed_candidates.append(observed_value / 100.0)
+
+    return any(
+        _approximately_equal(observed_candidate, expected)
+        for observed_candidate in observed_candidates
+        for expected in expected_values
+    )
+
+
 def _canonical_operations(item: CalculationItem) -> tuple[str, ...]:
     return tuple(
         operation
@@ -101,7 +185,7 @@ def _compact_numeric_example_without_joint_operation(
     segments: Sequence[Mapping[str, Any]],
     lookback_segments: int = 8,
     lookahead_segments: int = 2,
-    max_joint_window: int = 3,
+    max_joint_window: int = 4,
 ) -> bool:
     """Detect a numeric instance whose specific operands are not jointly stated.
 
@@ -110,11 +194,11 @@ def _compact_numeric_example_without_joint_operation(
     whether those exact literals plus every canonical operation can be grounded
     in one short contiguous source window. A window containing competing numeric
     operands is not accepted merely because the target literals happen to occur
-    nearby; at most one extra numeric value is allowed, and only when the same
-    window explicitly presents it as a result. If the inventory's numeric
-    operands do not appear anywhere in the bounded context, the event is left
-    to the more general outcome-only classifier rather than being called a
-    worked instance.
+    nearby. One extra numeric value may preserve the event when it is explicitly
+    presented as the result or mechanically verifies the already-claimed simple
+    arithmetic operation. If the inventory's numeric operands do not appear
+    anywhere in the bounded context, the event is left to the more general
+    outcome-only classifier rather than being called a worked instance.
     """
 
     if not item.variables_mentioned or not all(
@@ -166,14 +250,15 @@ def _compact_numeric_example_without_joint_operation(
             if not extra_numbers:
                 return False
 
-            # One extra number may be the explicitly stated result of the
-            # operation. Generic copulas such as "price is 800" are not enough
-            # to prove that the extra value is the result of this arithmetic.
-            if (
-                len(extra_numbers) == 1
-                and _EXPLICIT_RESULT_CUE_RE.search(text) is not None
-            ):
-                return False
+            if len(extra_numbers) == 1:
+                extra_literal = next(iter(extra_numbers))
+                if _EXPLICIT_RESULT_CUE_RE.search(text) is not None:
+                    return False
+                if _matches_arithmetic_result(
+                    item=item,
+                    extra_literal=extra_literal,
+                ):
+                    return False
 
     item_text = _segment_text(
         segments,
