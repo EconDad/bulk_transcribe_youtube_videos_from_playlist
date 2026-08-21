@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
+from unittest import mock
 
+import run_research_v43_resilient as resilient
 from research_v43.calculation_inventory import (
     CalculationInventory,
     CalculationItem,
@@ -61,6 +64,59 @@ class Gate2RecoveryTests(unittest.TestCase):
             inventory=inventory,
             segments=segments,
         )
+
+        self.assertFalse(audited.calculations[0].formula_expected)
+        self.assertTrue(
+            any(
+                record.get("action")
+                == "downgrade_non_symbolic_numeric_instance"
+                for record in records
+            )
+        )
+
+    def test_post_evidence_audit_rechecks_expanded_span(self):
+        segments = [
+            {"text": "For example, divide 50 by 1000."},
+            {"text": "Now let's say the price is 800."},
+            {"text": "The result is 6.3 percent."},
+        ]
+        item = self._item(
+            start=2,
+            end=2,
+            variables=("50", "800"),
+            operations=("division",),
+        )
+        inventory = CalculationInventory(
+            schema_version="1.0",
+            video_id="video",
+            calculations=(item,),
+        )
+        expanded = CalculationInventory(
+            schema_version="1.0",
+            video_id="video",
+            calculations=(replace(item, start_segment=0, end_segment=2),),
+        )
+
+        def fake_evidence_audit(*, inventory, segments, **kwargs):
+            return expanded, (
+                {
+                    "calculation_id": "CALC_0001",
+                    "action": "expand",
+                    "decision_source": "synthetic_test",
+                },
+            )
+
+        with mock.patch.object(
+            resilient,
+            "_ORIGINAL_RUN_INVENTORY_EVIDENCE_AUDIT",
+            side_effect=fake_evidence_audit,
+        ):
+            audited, records = (
+                resilient._run_inventory_evidence_audit_with_gate2_postcheck(
+                    inventory=inventory,
+                    segments=segments,
+                )
+            )
 
         self.assertFalse(audited.calculations[0].formula_expected)
         self.assertTrue(
