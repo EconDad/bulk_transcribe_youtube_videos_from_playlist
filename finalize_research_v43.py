@@ -11,7 +11,6 @@ from typing import Any, Mapping, Sequence
 from research_v43.finalization import (
     FINAL_PROMPT_VERSION,
     FinalizationError,
-    build_citations_and_research,
     build_narrative_chunks,
     build_narrative_extraction_prompt,
     build_synthesis_prompt,
@@ -19,6 +18,9 @@ from research_v43.finalization import (
     validate_diagnostic_for_finalization,
     verify_final_package,
     write_final_package,
+)
+from research_v43.finalization_recovery import (
+    build_citations_and_research_with_formula_claim_splitting,
 )
 from research_v43.narrative_recovery import recover_narrative_extraction
 from research_v43.synthesis_recovery import recover_synthesis
@@ -172,11 +174,13 @@ def finalize_video(
                 f"{last_error}"
             )
 
-        source_map, research, formulas_payload = build_citations_and_research(
-            narrative=narrative,
-            evidence=evidence,
-            formulas=formulas,
-            segments=segments,
+        source_map, research, formulas_payload = (
+            build_citations_and_research_with_formula_claim_splitting(
+                narrative=narrative,
+                evidence=evidence,
+                formulas=formulas,
+                segments=segments,
+            )
         )
         result = write_final_package(
             output_root=processed_root,
