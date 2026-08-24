@@ -65,6 +65,20 @@ def _find_minimal_grounded_span(
     return start, end
 
 
+def _adjacent_bounds(
+    *,
+    segment_count: int,
+    neighborhood_start: int,
+    neighborhood_end: int,
+) -> tuple[int, int]:
+    """Return the fixed small guard/operand extension around an audit window."""
+
+    return (
+        max(0, neighborhood_start - _ADJACENT_OPERAND_EXTENSION),
+        min(segment_count - 1, neighborhood_end + _ADJACENT_OPERAND_EXTENSION),
+    )
+
+
 def parse_inventory_evidence_audit_response_with_gate3_repair(
     response_text: str,
     *,
@@ -85,7 +99,11 @@ def parse_inventory_evidence_audit_response_with_gate3_repair(
     structure without inventing an operation or changing the calculation target.
 
     Otherwise the item is downgraded only when the claimed operation is absent
-    from the entire original audit neighborhood.
+    from the entire original audit neighborhood *and* the same fixed adjacent
+    guard contains no such operation cue. An adjacent cue is never borrowed to
+    validate the calculation, but its presence prevents an unsupported
+    non-symbolic downgrade when the audit window itself likely clipped the
+    operation evidence.
     """
 
     saved_error: InventoryEvidenceAuditError | None = None
@@ -206,13 +224,10 @@ def parse_inventory_evidence_audit_response_with_gate3_repair(
     # that immediately precede/follow that result. No extra operation may be
     # borrowed from the extension.
     if widened is None and operations_grounded:
-        extended_start = max(
-            0,
-            neighborhood_start - _ADJACENT_OPERAND_EXTENSION,
-        )
-        extended_end = min(
-            len(segments) - 1,
-            neighborhood_end + _ADJACENT_OPERAND_EXTENSION,
+        extended_start, extended_end = _adjacent_bounds(
+            segment_count=len(segments),
+            neighborhood_start=neighborhood_start,
+            neighborhood_end=neighborhood_end,
         )
         if (
             extended_start != neighborhood_start
@@ -263,15 +278,42 @@ def parse_inventory_evidence_audit_response_with_gate3_repair(
         for operation in operations
     )
     if not operation_supported_anywhere:
+        # Do not use an operation cue outside the original audit neighborhood
+        # to validate the calculation. But before downgrading to non-symbolic,
+        # inspect the same tiny adjacent guard used for operand recovery. If an
+        # operation cue is immediately outside the audit window, fail closed:
+        # the window may simply have clipped relevant operation evidence.
+        extended_start, extended_end = _adjacent_bounds(
+            segment_count=len(segments),
+            neighborhood_start=neighborhood_start,
+            neighborhood_end=neighborhood_end,
+        )
+        if (
+            extended_start != neighborhood_start
+            or extended_end != neighborhood_end
+        ):
+            adjacent_text = _range_text(
+                segments,
+                extended_start,
+                extended_end,
+            )
+            adjacent_operation_supported = any(
+                _gate3_has_operation_cue(operation, adjacent_text)
+                for operation in operations
+            )
+            if adjacent_operation_supported:
+                assert saved_error is not None
+                raise saved_error
+
         return InventoryAuditDecision(
             calculation_id=item.calculation_id,
             action=AuditAction.DOWNGRADE_NON_SYMBOLIC,
             evidence_segment_ids=evidence_ids,
             reason=(
                 "Gate 3 bounded recovery found no source cue for the claimed "
-                "arithmetic operation anywhere in the audit neighborhood; "
-                "the event is retained as non-symbolic rather than inventing "
-                "an operation."
+                "arithmetic operation anywhere in the audit neighborhood or "
+                "its fixed adjacent guard; the event is retained as "
+                "non-symbolic rather than inventing an operation."
             ),
         )
 
