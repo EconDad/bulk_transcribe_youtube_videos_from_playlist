@@ -75,6 +75,111 @@ class Gate3AuditSpanRecoveryTests(unittest.TestCase):
             ("addition",),
         )
 
+    def test_adjacent_extension_recovers_operand_just_outside_audit_neighborhood(self):
+        item = CalculationItem.from_mapping(
+            {
+                "calculation_id": "CALC_0001",
+                "name": "Sum listed values",
+                "source_mode": "spoken",
+                "start_segment": 11,
+                "end_segment": 12,
+                "variables_mentioned": [
+                    "cash",
+                    "stand",
+                    "machine",
+                    "supplies",
+                    "land",
+                ],
+                "operations_mentioned": ["addition"],
+                "visual_equation_cue": False,
+                "formula_expected": True,
+                "reason": "The source states a summed total.",
+            }
+        )
+        segments = [
+            {"text": "The cash is introduced here."},
+            {"text": "Background."},
+            {"text": "Background."},
+            {"text": "The stand is listed."},
+            {"text": "The machine is listed."},
+            {"text": "The supplies are listed."},
+            {"text": "The land is listed."},
+            {"text": "Background."},
+            {"text": "Background."},
+            {"text": "Background."},
+            {"text": "Background."},
+            {"text": "When we sum up those assets,"},
+            {"text": "the result is the total."},
+        ]
+        payload = {
+            "calculation_id": "CALC_0001",
+            "action": "reconcile",
+            "evidence_segment_ids": [11, 12],
+            "reason": "The result follows the operand list.",
+            "revised_variables_mentioned": [
+                "cash",
+                "stand",
+                "machine",
+                "supplies",
+                "land",
+            ],
+            "revised_operations_mentioned": ["addition"],
+        }
+
+        decision = parse_inventory_evidence_audit_response_with_gate3_repair(
+            json.dumps(payload),
+            item=item,
+            segments=segments,
+            neighborhood_start=3,
+            neighborhood_end=12,
+        )
+
+        self.assertEqual(decision.action, AuditAction.RECONCILE)
+        self.assertEqual(min(decision.evidence_segment_ids), 0)
+        self.assertEqual(max(decision.evidence_segment_ids), 12)
+        self.assertIn("adjacent operand recovery", decision.reason)
+
+    def test_adjacent_extension_requires_operation_in_selected_span(self):
+        item = CalculationItem.from_mapping(
+            {
+                "calculation_id": "CALC_0001",
+                "name": "Synthetic calculation",
+                "source_mode": "spoken",
+                "start_segment": 5,
+                "end_segment": 5,
+                "variables_mentioned": ["first", "second"],
+                "operations_mentioned": ["addition"],
+                "visual_equation_cue": False,
+                "formula_expected": True,
+                "reason": "Synthetic item.",
+            }
+        )
+        segments = [
+            {"text": "The first value appears."},
+            {"text": "The second value appears."},
+            {"text": "We add those values."},
+            {"text": "Background."},
+            {"text": "Background."},
+            {"text": "The result is stated here."},
+        ]
+        payload = {
+            "calculation_id": "CALC_0001",
+            "action": "reconcile",
+            "evidence_segment_ids": [5],
+            "reason": "Attempted reconciliation.",
+            "revised_variables_mentioned": ["first", "second"],
+            "revised_operations_mentioned": ["addition"],
+        }
+
+        with self.assertRaises(Exception):
+            parse_inventory_evidence_audit_response_with_gate3_repair(
+                json.dumps(payload),
+                item=item,
+                segments=segments,
+                neighborhood_start=3,
+                neighborhood_end=5,
+            )
+
     def test_does_not_widen_when_revised_claim_never_grounds(self):
         item = CalculationItem.from_mapping(
             {
