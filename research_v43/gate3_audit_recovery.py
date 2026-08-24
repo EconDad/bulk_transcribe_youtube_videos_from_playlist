@@ -22,6 +22,52 @@ from .inventory_evidence_audit import (
 )
 
 
+def _find_minimal_grounded_span(
+    *,
+    item: CalculationItem,
+    evidence_ids: Sequence[int],
+    variables: Sequence[str],
+    operations: Sequence[str],
+    segments: Sequence[Mapping[str, object]],
+    neighborhood_start: int,
+    neighborhood_end: int,
+) -> tuple[int, int] | None:
+    """Find the smallest bounded hull that grounds the model's revised claims.
+
+    This does not alter variables, operations, or the calculation target.  It
+    only widens the evidence hull inside the already-bounded audit neighborhood
+    when the model selected a result/operation segment but left nearby operand
+    naming outside its explicit evidence IDs.
+    """
+
+    required_start = min(item.start_segment, *evidence_ids)
+    required_end = max(item.end_segment, *evidence_ids)
+
+    candidates: list[tuple[int, int, int, int]] = []
+    for start in range(neighborhood_start, required_start + 1):
+        for end in range(required_end, neighborhood_end + 1):
+            text = _range_text(segments, start, end)
+            if not all(
+                _gate3_variable_appears(variable, text)
+                for variable in variables
+            ):
+                continue
+            if not all(
+                _gate3_has_operation_cue(operation, text)
+                for operation in operations
+            ):
+                continue
+            width = end - start + 1
+            added = (required_start - start) + (end - required_end)
+            candidates.append((added, width, start, end))
+
+    if not candidates:
+        return None
+
+    _, _, start, end = min(candidates)
+    return start, end
+
+
 def parse_inventory_evidence_audit_response_with_gate3_repair(
     response_text: str,
     *,
@@ -33,9 +79,12 @@ def parse_inventory_evidence_audit_response_with_gate3_repair(
     """Resolve only mechanically grounded Gate 3 audit failures.
 
     A failed reconcile is accepted only when every revised variable and revised
-    operation is grounded inside the model-selected contiguous span under the
-    generic Gate 3 lexical rules. Otherwise the item is downgraded only when
-    the claimed operation is absent from the *entire* bounded neighborhood.
+    operation is grounded inside a contiguous span within the already-bounded
+    audit neighborhood under the generic Gate 3 lexical rules.  The model's
+    selected span is tried first; if it omitted nearby operand naming, Python
+    may widen only the evidence hull while keeping the revised claims unchanged.
+    Otherwise the item is downgraded only when the claimed operation is absent
+    from the *entire* bounded neighborhood.
     """
 
     saved_error: InventoryEvidenceAuditError | None = None
@@ -135,6 +184,31 @@ def parse_inventory_evidence_audit_response_with_gate3_repair(
                 reason
                 or "Gate 3 bounded lexical recovery grounded the revised claims."
             ),
+            revised_variables_mentioned=variables,
+            revised_operations_mentioned=operations,
+        )
+
+    widened = _find_minimal_grounded_span(
+        item=item,
+        evidence_ids=evidence_ids,
+        variables=variables,
+        operations=operations,
+        segments=segments,
+        neighborhood_start=neighborhood_start,
+        neighborhood_end=neighborhood_end,
+    )
+    if widened is not None:
+        widened_start, widened_end = widened
+        widened_ids = tuple(sorted({*evidence_ids, widened_start, widened_end}))
+        return InventoryAuditDecision(
+            calculation_id=item.calculation_id,
+            action=AuditAction.RECONCILE,
+            evidence_segment_ids=widened_ids,
+            reason=(
+                (reason + " ") if reason else ""
+            )
+            + "Gate 3 bounded evidence-hull recovery included nearby source "
+            "segments needed to ground the unchanged revised claims.",
             revised_variables_mentioned=variables,
             revised_operations_mentioned=operations,
         )
