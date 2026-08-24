@@ -36,8 +36,10 @@ from research_v43.gate2_recovery import (
     audit_with_gate2_semantic_downgrades,
     find_deterministic_expansion_gate2,
 )
-from research_v43.gate3_recovery import (
+from research_v43.gate3_audit_recovery import (
     parse_inventory_evidence_audit_response_with_gate3_repair,
+)
+from research_v43.gate3_recovery import (
     parse_inventory_response_with_gate3_repair,
     validate_entailment_response_with_gate3_structure_repair,
 )
