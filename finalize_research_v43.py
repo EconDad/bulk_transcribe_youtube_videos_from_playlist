@@ -22,8 +22,11 @@ from research_v43.finalization import (
 from research_v43.finalization_recovery import (
     build_citations_and_research_with_formula_claim_splitting,
 )
+from research_v43.gate3_recovery import (
+    build_synthesis_retry_prompt,
+    recover_synthesis_with_gate3_sentence_count,
+)
 from research_v43.narrative_recovery import recover_narrative_extraction
-from research_v43.synthesis_recovery import recover_synthesis
 from research_v43.model_client import ModelClientError, OllamaJsonClient
 from run_research_v43 import load_transcript_source
 from youtube_research_analysis import ResearchManifestStore, TranscriptSourcePackage
@@ -144,9 +147,17 @@ def finalize_video(
         for attempt in range(1, 4):
             stage = f"narrative_synthesis attempt {attempt}/3"
             print(f"START {stage}", flush=True)
+            attempt_prompt = (
+                synthesis_prompt
+                if last_error is None
+                else build_synthesis_retry_prompt(
+                    synthesis_prompt,
+                    last_error,
+                )
+            )
             response = client.complete_json(
                 system_prompt=NARRATIVE_SYSTEM_PROMPT,
-                user_prompt=synthesis_prompt,
+                user_prompt=attempt_prompt,
                 stage=stage,
                 num_predict=max(num_predict, 1900),
                 think=False,
@@ -154,7 +165,7 @@ def finalize_video(
             invocations.append(response.invocation.to_dict())
             repairs: list[str] = []
             try:
-                narrative = recover_synthesis(
+                narrative = recover_synthesis_with_gate3_sentence_count(
                     response.payload,
                     evidence=evidence,
                     segments=segments,
