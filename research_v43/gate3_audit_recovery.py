@@ -22,6 +22,9 @@ from .inventory_evidence_audit import (
 )
 
 
+_ADJACENT_OPERAND_EXTENSION = 4
+
+
 def _find_minimal_grounded_span(
     *,
     item: CalculationItem,
@@ -32,13 +35,7 @@ def _find_minimal_grounded_span(
     neighborhood_start: int,
     neighborhood_end: int,
 ) -> tuple[int, int] | None:
-    """Find the smallest bounded hull that grounds the model's revised claims.
-
-    This does not alter variables, operations, or the calculation target.  It
-    only widens the evidence hull inside the already-bounded audit neighborhood
-    when the model selected a result/operation segment but left nearby operand
-    naming outside its explicit evidence IDs.
-    """
+    """Find the smallest supplied hull that grounds unchanged revised claims."""
 
     required_start = min(item.start_segment, *evidence_ids)
     required_end = max(item.end_segment, *evidence_ids)
@@ -79,12 +76,16 @@ def parse_inventory_evidence_audit_response_with_gate3_repair(
     """Resolve only mechanically grounded Gate 3 audit failures.
 
     A failed reconcile is accepted only when every revised variable and revised
-    operation is grounded inside a contiguous span within the already-bounded
-    audit neighborhood under the generic Gate 3 lexical rules.  The model's
-    selected span is tried first; if it omitted nearby operand naming, Python
-    may widen only the evidence hull while keeping the revised claims unchanged.
+    operation is grounded in a contiguous source span under the generic Gate 3
+    lexical rules. The model-selected span is tried first, followed by the
+    original bounded audit neighborhood. If the selected span itself already
+    contains every claimed operation cue, Python may make one final, tightly
+    bounded adjacent search of at most four segments on either side solely to
+    locate the unchanged named operands. This handles result-after-list source
+    structure without inventing an operation or changing the calculation target.
+
     Otherwise the item is downgraded only when the claimed operation is absent
-    from the *entire* bounded neighborhood.
+    from the entire original audit neighborhood.
     """
 
     saved_error: InventoryEvidenceAuditError | None = None
@@ -188,6 +189,7 @@ def parse_inventory_evidence_audit_response_with_gate3_repair(
             revised_operations_mentioned=operations,
         )
 
+    # First search only the original bounded audit neighborhood.
     widened = _find_minimal_grounded_span(
         item=item,
         evidence_ids=evidence_ids,
@@ -197,18 +199,56 @@ def parse_inventory_evidence_audit_response_with_gate3_repair(
         neighborhood_start=neighborhood_start,
         neighborhood_end=neighborhood_end,
     )
+    widened_adjacent = False
+
+    # If the model-selected result span already states the operation, allow a
+    # tiny deterministic adjacent extension solely to recover named operands
+    # that immediately precede/follow that result. No extra operation may be
+    # borrowed from the extension.
+    if widened is None and operations_grounded:
+        extended_start = max(
+            0,
+            neighborhood_start - _ADJACENT_OPERAND_EXTENSION,
+        )
+        extended_end = min(
+            len(segments) - 1,
+            neighborhood_end + _ADJACENT_OPERAND_EXTENSION,
+        )
+        if (
+            extended_start != neighborhood_start
+            or extended_end != neighborhood_end
+        ):
+            widened = _find_minimal_grounded_span(
+                item=item,
+                evidence_ids=evidence_ids,
+                variables=variables,
+                operations=operations,
+                segments=segments,
+                neighborhood_start=extended_start,
+                neighborhood_end=extended_end,
+            )
+            widened_adjacent = widened is not None
+
     if widened is not None:
         widened_start, widened_end = widened
         widened_ids = tuple(sorted({*evidence_ids, widened_start, widened_end}))
+        suffix = (
+            " Gate 3 adjacent operand recovery extended beyond the standard "
+            "audit neighborhood only after the selected span independently "
+            "grounded every claimed operation cue."
+            if widened_adjacent
+            else ""
+        )
         return InventoryAuditDecision(
             calculation_id=item.calculation_id,
             action=AuditAction.RECONCILE,
             evidence_segment_ids=widened_ids,
             reason=(
-                (reason + " ") if reason else ""
-            )
-            + "Gate 3 bounded evidence-hull recovery included nearby source "
-            "segments needed to ground the unchanged revised claims.",
+                ((reason + " ") if reason else "")
+                + "Gate 3 bounded evidence-hull recovery included nearby "
+                "source segments needed to ground the unchanged revised claims."
+                + suffix
+            ),
             revised_variables_mentioned=variables,
             revised_operations_mentioned=operations,
         )
