@@ -301,6 +301,32 @@ class EntailmentTests(unittest.TestCase):
             )
         )
 
+    def test_amount_removal_language_is_a_subtraction_cue(self):
+        from research_v43.entailment import _has_operation_cue
+
+        self.assertTrue(
+            _has_operation_cue(
+                "subtraction",
+                "We had $20 go straight out of the $100 right off the top.",
+            )
+        )
+        self.assertTrue(
+            _has_operation_cue(
+                "subtraction",
+                "We take $10 out for taxes and that leaves $20.",
+            )
+        )
+
+    def test_unquantified_removal_language_is_not_a_subtraction_cue(self):
+        from research_v43.entailment import _has_operation_cue
+
+        self.assertFalse(
+            _has_operation_cue("subtraction", "We went out for dinner.")
+        )
+        self.assertFalse(
+            _has_operation_cue("subtraction", "Please take out the trash.")
+        )
+
     def test_non_exact_operation_quote_fails(self):
         segments = [
             {"text": "Divide the total value by the item count."},

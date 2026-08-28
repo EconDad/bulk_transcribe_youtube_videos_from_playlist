@@ -38,6 +38,7 @@ _OPERATION_CUES: dict[str, tuple[str, ...]] = {
         "gain",
         "gained",
         "deduct",
+        "off the top",
     ),
     "multiplication": (
         "multiply",
@@ -724,6 +725,8 @@ def _has_operation_cue(operation: str, text: str) -> bool:
         return False
 
     normalized = _normalize(text)
+    if operation == "subtraction" and _has_removal_subtraction_cue(normalized):
+        return True
     for cue in cues:
         normalized_cue = _normalize(cue)
         escaped = re.escape(normalized_cue).replace(r"\ ", r"\s+")
@@ -741,6 +744,17 @@ def _has_operation_cue(operation: str, text: str) -> bool:
         if re.search(pattern, normalized):
             return True
     return False
+
+
+def _has_removal_subtraction_cue(text: str) -> bool:
+    """Recognize bounded amount-removal phrasing as subtraction."""
+
+    amount = r"(?:\$?\d[\d,.]*|zero|one|two|three|four|five|six|seven|eight|nine|ten)"
+    patterns = (
+        rf"\b(?:take|takes|took|taking)\s+{amount}(?:\s+\w+){{0,3}}\s+out\b",
+        rf"\b{amount}(?:\s+\w+){{0,4}}\s+(?:go|goes|went|gone)\s+(?:\w+\s+){{0,3}}out\s+of\s+(?:the\s+)?{amount}\b",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
 
 
 def _dependency_cycle_issues(
