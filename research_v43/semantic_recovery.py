@@ -56,6 +56,7 @@ _EXAMPLE_CUE_RE = re.compile(
 _NUMBER_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:[$€£]\s*)?[+-]?\d[\d,]*(?:\.\d+)?%?"
 )
+_SNAKE_IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def _segment_text(
@@ -249,7 +250,7 @@ def audit_visual_equation_cues_with_semantic_downgrades(
 def _complete_candidate_variable_metadata(
     raw_candidate: Mapping[str, Any],
 ) -> dict[str, Any]:
-    candidate = copy.deepcopy(dict(raw_candidate))
+    candidate = _canonicalize_candidate_identifier_case(raw_candidate)
     ascii_formula = candidate.get("ascii")
     if not isinstance(ascii_formula, str) or not ascii_formula.strip():
         return candidate
@@ -290,6 +291,65 @@ def _complete_candidate_variable_metadata(
         )
         existing.add(symbol)
 
+    candidate["variables"] = variables
+    return candidate
+
+
+def _canonicalize_candidate_identifier_case(
+    raw_candidate: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Normalize identifier letter case without changing formula structure."""
+
+    candidate = copy.deepcopy(dict(raw_candidate))
+    ascii_formula = candidate.get("ascii")
+    raw_variables = candidate.get("variables")
+    if (
+        not isinstance(ascii_formula, str)
+        or isinstance(raw_variables, (str, bytes))
+        or not isinstance(raw_variables, Sequence)
+    ):
+        return candidate
+
+    variables = [
+        copy.deepcopy(dict(value))
+        for value in raw_variables
+        if isinstance(value, Mapping)
+    ]
+    if len(variables) != len(raw_variables):
+        return candidate
+
+    replacements: dict[str, str] = {}
+    for variable in variables:
+        symbol = variable.get("symbol")
+        if not isinstance(symbol, str) or not symbol.strip():
+            return candidate
+        symbol = symbol.strip()
+        if _SNAKE_IDENTIFIER_RE.fullmatch(symbol):
+            continue
+        normalized = symbol.casefold()
+        if not symbol.isidentifier() or not _SNAKE_IDENTIFIER_RE.fullmatch(
+            normalized
+        ):
+            return candidate
+        replacements[symbol] = normalized
+
+    final_symbols = [
+        replacements.get(str(variable["symbol"]).strip(), str(variable["symbol"]).strip())
+        for variable in variables
+    ]
+    if len(set(final_symbols)) != len(final_symbols):
+        return candidate
+
+    for original, normalized in replacements.items():
+        ascii_formula = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(original)}(?![A-Za-z0-9_])",
+            normalized,
+            ascii_formula,
+        )
+    for variable, symbol in zip(variables, final_symbols, strict=True):
+        variable["symbol"] = symbol
+
+    candidate["ascii"] = ascii_formula
     candidate["variables"] = variables
     return candidate
 

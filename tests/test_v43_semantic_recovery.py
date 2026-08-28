@@ -181,6 +181,63 @@ class SemanticRecoveryTests(unittest.TestCase):
             "ratio = spending / money_spent",
         )
 
+    def test_mixed_case_identifiers_are_canonicalized_before_validation(self):
+        item = inventory_with(
+            {
+                "calculation_id": "CALC_0001",
+                "name": "Bond value",
+                "source_mode": "spoken",
+                "start_segment": 0,
+                "end_segment": 0,
+                "variables_mentioned": ["present value", "coupon payment"],
+                "operations_mentioned": ["addition"],
+                "visual_equation_cue": True,
+                "formula_expected": True,
+                "reason": "The source states a reusable equation.",
+            }
+        ).calculations[0]
+        payload = {
+            "calculation_id": "CALC_0001",
+            "disposition": "candidates_proposed",
+            "reason": "The source states a reusable equation.",
+            "candidates": [
+                {
+                    "calculation_id": "CALC_0001",
+                    "formula_id": "bond_value",
+                    "name": "Bond value",
+                    "ascii": "PV = Coupon + Face_Value",
+                    "latex": r"PV = C + F",
+                    "derivation_type": "stated",
+                    "variables": [
+                        {"symbol": "PV", "meaning": "present value", "unit": "$"},
+                        {"symbol": "Coupon", "meaning": "coupon payment", "unit": "$"},
+                        {"symbol": "Face_Value", "meaning": "face value", "unit": "$"},
+                    ],
+                    "derivation_steps": ["Add coupon payment and face value."],
+                    "source_claims": [
+                        {
+                            "start_segment": 0,
+                            "end_segment": 0,
+                            "relationship": "Present value equals coupon plus face value.",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        parsed = parse_formula_extraction_response_with_variable_completion(
+            payload,
+            item=item,
+        )
+
+        candidate = parsed.candidates[0]
+        self.assertEqual(candidate.ascii, "pv = coupon + face_value")
+        self.assertEqual(
+            {variable["symbol"] for variable in candidate.variables},
+            {"pv", "coupon", "face_value"},
+        )
+        self.assertEqual(payload["candidates"][0]["ascii"], "PV = Coupon + Face_Value")
+
     def test_entailment_operation_evidence_can_use_grounding_hull(self):
         item = inventory_with(
             {
