@@ -44,6 +44,9 @@ _OPERATION_CUES: dict[str, tuple[str, ...]] = {
         "multiplied",
         "times",
         "product",
+        "percent of",
+        "percentage of",
+        "% of",
     ),
     "division": (
         "divide",
@@ -442,7 +445,7 @@ def build_entailment_repair_prompt(
     invalid_payload: Mapping[str, Any],
     validation_issues: Sequence[str],
 ) -> str:
-    """Build one bounded correction request for altered AST fields."""
+    """Build one bounded correction request for structural or quote defects."""
 
     return (
         build_entailment_prompt(
@@ -451,11 +454,19 @@ def build_entailment_repair_prompt(
             segments=segments,
         )
         + "\n\nREPAIR REQUEST:\n"
-        + "The previous JSON altered immutable AST fields or failed structural "
-        + "validation. Return a complete replacement object. Copy every "
+        + "The previous JSON altered immutable AST fields, used non-literal "
+        + "evidence text, or failed structural validation. Return a complete "
+        + "replacement object. Copy every "
         + "node_id, expression, and operation exactly from the response schema. "
         + "Do not include a left-hand assignment in node.expression. Correct "
-        + "only the listed defects and remain within the supplied transcript.\n\n"
+        + "only the listed defects and remain within the supplied transcript. "
+        + "Every evidence and identifier-grounding quote must be a literal, "
+        + "verbatim substring of its cited transcript segment range; do not "
+        + "normalize spoken numbers, punctuation, or wording. Treat every "
+        + "listed validation issue as a mandatory edit: locate the cited "
+        + "segment text and replace the rejected quote with text copied "
+        + "directly from that range. Never repeat a quote identified below "
+        + "as not present.\n\n"
         + "VALIDATION ISSUES:\n"
         + json.dumps(list(validation_issues), indent=2)
         + "\n\nINVALID RESPONSE:\n"
@@ -716,7 +727,17 @@ def _has_operation_cue(operation: str, text: str) -> bool:
     for cue in cues:
         normalized_cue = _normalize(cue)
         escaped = re.escape(normalized_cue).replace(r"\ ", r"\s+")
-        pattern = rf"(?<![a-z0-9_]){escaped}(?![a-z0-9_])"
+        left_boundary = (
+            r"(?<![a-z0-9_])"
+            if normalized_cue[0].isalnum() or normalized_cue[0] == "_"
+            else ""
+        )
+        right_boundary = (
+            r"(?![a-z0-9_])"
+            if normalized_cue[-1].isalnum() or normalized_cue[-1] == "_"
+            else ""
+        )
+        pattern = rf"{left_boundary}{escaped}{right_boundary}"
         if re.search(pattern, normalized):
             return True
     return False

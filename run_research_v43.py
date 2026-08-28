@@ -543,6 +543,8 @@ def _entail_with_one_repair(
             if (
                 "expression does not match AST" in issue
                 or "operation does not match AST" in issue
+                or "quote is not present in cited segments" in issue
+                or "grounding quote for " in issue
             )
         ]
         if not validation_issues:
@@ -939,8 +941,8 @@ def run_pipeline(
         segments=segments,
     )
     _log(
-        "INVENTORY AUDIT: "
-        f"{len(visual_audit_records)} visual cue promotion(s)"
+        "INVENTORY PRE-EVIDENCE AUDIT: "
+        f"{len(visual_audit_records)} decision record(s)"
     )
 
     inventory, evidence_audit_records = _run_inventory_evidence_audit(

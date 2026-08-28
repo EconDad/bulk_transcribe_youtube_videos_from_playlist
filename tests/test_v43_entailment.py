@@ -4,6 +4,7 @@ import unittest
 
 from research_v43.calculation_inventory import CalculationItem
 from research_v43.entailment import (
+    build_entailment_repair_prompt,
     EntailmentValidationError,
     build_entailment_prompt,
     validate_entailment_response,
@@ -93,6 +94,24 @@ def grounding(identifier, segment, quote):
 
 
 class EntailmentTests(unittest.TestCase):
+    def test_repair_prompt_requires_literal_replacement_quotes(self):
+        prompt = build_entailment_repair_prompt(
+            item=make_item(),
+            candidate=make_candidate(),
+            segments=[
+                {"text": "Add the first and second values."},
+                {"text": "Divide that total by the count."},
+            ],
+            invalid_payload={"nodes": []},
+            validation_issues=[
+                "NODE_0001 grounding quote for first is not present in cited segments"
+            ],
+        )
+
+        self.assertIn("mandatory edit", prompt)
+        self.assertIn("Never repeat a quote", prompt)
+        self.assertIn("literal, verbatim substring", prompt)
+
     def test_direct_single_node_entailment_passes(self):
         segments = [
             {"text": "Divide the total value by the item count."},
@@ -248,6 +267,38 @@ class EntailmentTests(unittest.TestCase):
         self.assertFalse(report.passed)
         self.assertTrue(
             any("lacks a cue" in issue for issue in report.issues)
+        )
+
+    def test_percent_of_is_a_multiplication_cue(self):
+        from research_v43.entailment import _has_operation_cue
+
+        self.assertTrue(
+            _has_operation_cue(
+                "multiplication",
+                "Equity is three and a half percent of market price.",
+            )
+        )
+        self.assertTrue(
+            _has_operation_cue(
+                "multiplication",
+                "The amount is 10% of the total.",
+            )
+        )
+
+    def test_unrelated_percent_language_is_not_a_multiplication_cue(self):
+        from research_v43.entailment import _has_operation_cue
+
+        self.assertFalse(
+            _has_operation_cue(
+                "multiplication",
+                "The percentage increased during the year.",
+            )
+        )
+        self.assertFalse(
+            _has_operation_cue(
+                "multiplication",
+                "The investment produced a 10 percent return.",
+            )
         )
 
     def test_non_exact_operation_quote_fails(self):

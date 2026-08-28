@@ -5,9 +5,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from research_v43.calculation_inventory import CalculationItem
 from research_v43.expression_ast import FormulaCandidate
 from research_v43.model_client import JsonModelResponse, ModelInvocation
-from run_research_v43 import run_pipeline
+from run_research_v43 import _entail_with_one_repair, run_pipeline
 
 
 class FakeClient:
@@ -104,6 +105,78 @@ def grounding(identifier, quote):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_entailment_grounding_quote_defect_routes_one_repair(self):
+        candidate = FormulaCandidate.from_mapping(candidate_payload())
+        node = candidate.parsed.operations[0]
+        item_payload = {
+            "calculation_id": "CALC_0001",
+            "name": "Normalize a measurement",
+            "source_mode": "spoken",
+            "start_segment": 0,
+            "end_segment": 0,
+            "variables_mentioned": ["total value", "item count"],
+            "operations_mentioned": ["division"],
+            "visual_equation_cue": False,
+            "formula_expected": True,
+            "reason": "The speaker states a division.",
+        }
+        item = CalculationItem.from_mapping(item_payload)
+        invalid = {
+            "calculation_id": "CALC_0001",
+            "formula_id": "normalized_measurement",
+            "nodes": [{
+                "node_id": node.node_id,
+                "expression": node.expression,
+                "operation": node.operation,
+                "status": "entailed",
+                "evidence": [{
+                    "start_segment": 0,
+                    "end_segment": 0,
+                    "quote": "Divide the normalized value.",
+                }],
+                "identifier_groundings": [
+                    grounding("total_value", "total value"),
+                    grounding("item_count", "item count"),
+                    grounding("normalized_measurement", "normalized value"),
+                ],
+                "depends_on_node_ids": [],
+                "derivation_step": "",
+            }],
+        }
+        repaired = json.loads(json.dumps(invalid))
+        repaired["nodes"][0]["evidence"][0]["quote"] = (
+            "Divide the total value by the item count"
+        )
+        repaired["nodes"][0]["identifier_groundings"][2]["quote"] = (
+            "normalized measurement"
+        )
+        client = FakeClient([invalid, repaired])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            report, _, reason = _entail_with_one_repair(
+                item=item,
+                candidate=candidate,
+                segments=[
+                    {
+                        "text": (
+                            "Divide the total value by the item count to get "
+                            "the normalized measurement."
+                        )
+                    }
+                ],
+                client=client,
+                checkpoint=Path(temporary) / "entailment.json",
+                expected={"stage": "formula_entailment"},
+                resume=False,
+                num_predict=1536,
+                invocations=[],
+            )
+
+        self.assertIsNone(reason)
+        self.assertIsNotNone(report)
+        self.assertTrue(report.passed, report.issues)
+        self.assertEqual(client.calls, 2)
+
     def test_complete_spoken_formula_pipeline(self):
         candidate = FormulaCandidate.from_mapping(candidate_payload())
         node = candidate.parsed.operations[0]
