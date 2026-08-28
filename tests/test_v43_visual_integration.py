@@ -59,6 +59,112 @@ def write_source(root: Path, video_id: str):
 
 
 class VisualRunnerIntegrationTests(unittest.TestCase):
+    def test_mixed_source_without_visual_equation_uses_text_fallback(self):
+        video_id = "video-mixed"
+        inventory = {
+            "schema_version": "1.0",
+            "video_id": video_id,
+            "calculations": [{
+                "calculation_id": "CALC_0001",
+                "name": "Spoken ratio",
+                "source_mode": "mixed",
+                "start_segment": 0,
+                "end_segment": 0,
+                "variables_mentioned": ["total value", "item count"],
+                "operations_mentioned": ["division"],
+                "visual_equation_cue": True,
+                "formula_expected": True,
+                "reason": "The source speaks a ratio near a visual cue.",
+            }],
+        }
+        candidate_payload = {
+            "calculation_id": "CALC_0001",
+            "formula_id": "ratio",
+            "name": "Spoken ratio",
+            "ascii": "result = total_value / item_count",
+            "latex": r"r=\frac{v}{n}",
+            "derivation_type": "stated",
+            "variables": [
+                {"symbol": "result", "meaning": "result", "unit": ""},
+                {"symbol": "total_value", "meaning": "total value", "unit": ""},
+                {"symbol": "item_count", "meaning": "item count", "unit": ""},
+            ],
+            "derivation_steps": ["Divide total value by item count."],
+            "source_claims": [{
+                "start_segment": 0,
+                "end_segment": 0,
+                "relationship": "division",
+            }],
+        }
+        candidate = FormulaCandidate.from_mapping(candidate_payload)
+        node = candidate.parsed.operations[0]
+        extraction = {
+            "calculation_id": "CALC_0001",
+            "disposition": "candidates_proposed",
+            "reason": "The transcript states the relationship.",
+            "candidates": [candidate_payload],
+        }
+        quote = "Divide the total value by the item count to get the result."
+        entailment = {
+            "calculation_id": "CALC_0001",
+            "formula_id": "ratio",
+            "nodes": [{
+                "node_id": node.node_id,
+                "expression": node.expression,
+                "operation": node.operation,
+                "status": "entailed",
+                "evidence": [{"start_segment": 0, "end_segment": 0, "quote": quote}],
+                "identifier_groundings": [
+                    {"identifier": "total_value", "start_segment": 0, "end_segment": 0, "quote": "total value"},
+                    {"identifier": "item_count", "start_segment": 0, "end_segment": 0, "quote": "item count"},
+                    {"identifier": "result", "start_segment": 0, "end_segment": 0, "quote": "result"},
+                ],
+                "depends_on_node_ids": [],
+                "derivation_step": "",
+            }],
+        }
+        visual_result = VisualRecoveryResult(
+            calculation_id="CALC_0001",
+            state="visual_review_required",
+            reason="No equation found.",
+            candidate=None,
+            evidence={
+                "schema_version": "1.0",
+                "calculation_id": "CALC_0001",
+                "status": "visual_review_required",
+                "reason": "No equation found.",
+            },
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            raw_root = base / "Raw Transcripts"
+            write_source(raw_root, video_id)
+            (raw_root / video_id / "transcript.json").write_text(
+                json.dumps([{"start": 0, "end": 1, "text": quote}]),
+                encoding="utf-8",
+            )
+            client = FakeClient([inventory, extraction, entailment])
+            visual = FakeVisualRecoverer(visual_result)
+            exit_code, package = run_pipeline(
+                video_id=video_id,
+                client=client,
+                raw_root=raw_root,
+                output_root=base / "Diagnostics",
+                progress_root=base / "Progress",
+                visual_recoverer=visual,
+            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(client.calls, 3)
+            coverage = json.loads((package / "formula_coverage.json").read_text())
+            self.assertTrue(coverage["passed"])
+            self.assertEqual(coverage["formulas_retained"], 1)
+            visual_evidence = json.loads((package / "visual_evidence.json").read_text())
+            self.assertEqual(
+                visual_evidence["records"][0]["status"],
+                "no_equation_text_fallback",
+            )
+
     def test_visual_consensus_candidate_routes_to_formula_retained(self):
         video_id = "video-visual"
         inventory = {

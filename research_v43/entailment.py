@@ -727,6 +727,8 @@ def _has_operation_cue(operation: str, text: str) -> bool:
     normalized = _normalize(text)
     if operation == "subtraction" and _has_removal_subtraction_cue(normalized):
         return True
+    if operation == "division" and _has_percent_ratio_division_cue(normalized):
+        return True
     for cue in cues:
         normalized_cue = _normalize(cue)
         escaped = re.escape(normalized_cue).replace(r"\ ", r"\s+")
@@ -755,6 +757,20 @@ def _has_removal_subtraction_cue(text: str) -> bool:
         rf"\b{amount}(?:\s+\w+){{0,4}}\s+(?:go|goes|went|gone)\s+(?:\w+\s+){{0,3}}out\s+of\s+(?:the\s+)?{amount}\b",
     )
     return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _has_percent_ratio_division_cue(text: str) -> bool:
+    """Recognize an explicit amount-to-base percentage relationship."""
+
+    amount = (
+        r"(?:[$€£]?\d[\d,.]*|zero|one|two|three|four|five|six|seven|"
+        r"eight|nine|ten|fifty|hundred|thousand)"
+    )
+    return re.search(
+        rf"\b{amount}(?:\s+\w+){{0,3}}\s+from\s+(?:the\s+)?"
+        rf"{amount}(?:\s+\w+){{0,4}}\s+is\s+{amount}\s+percent\b",
+        text,
+    ) is not None
 
 
 def _dependency_cycle_issues(

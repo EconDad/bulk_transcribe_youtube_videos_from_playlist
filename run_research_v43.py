@@ -1071,40 +1071,55 @@ def run_pipeline(
                 _log(f"REVIEW visual_recovery {item.calculation_id}: {reason}")
                 continue
 
-            visual_evidence_records.append(dict(visual_result.evidence))
             if visual_result.candidate is None:
+                if item.source_mode is SourceMode.MIXED:
+                    fallback_evidence = dict(visual_result.evidence)
+                    fallback_evidence["status"] = "no_equation_text_fallback"
+                    fallback_evidence["reason"] = (
+                        visual_result.reason
+                        + " Mixed-source item continued through strict "
+                          "transcript extraction."
+                    )
+                    visual_evidence_records.append(fallback_evidence)
+                    _log(
+                        f"TEXT FALLBACK visual_recovery {item.calculation_id}: "
+                        f"{visual_result.reason}"
+                    )
+                else:
+                    visual_evidence_records.append(dict(visual_result.evidence))
+                    resolutions.append(
+                        {
+                            "calculation_id": item.calculation_id,
+                            "state": "visual_review_required",
+                            "formula_ids": [],
+                            "reason": visual_result.reason,
+                        }
+                    )
+                    _log(
+                        f"REVIEW visual_recovery {item.calculation_id}: "
+                        f"{visual_result.reason}"
+                    )
+                    continue
+            else:
+                visual_evidence_records.append(dict(visual_result.evidence))
+                retained_formulas.append(visual_result.candidate.to_dict())
                 resolutions.append(
                     {
                         "calculation_id": item.calculation_id,
-                        "state": "visual_review_required",
-                        "formula_ids": [],
-                        "reason": visual_result.reason,
+                        "state": "formula_retained",
+                        "formula_ids": [visual_result.candidate.formula_id],
+                        "reason": (
+                            "Visual formula passed autonomous source-frame "
+                            "acquisition, shared-parser validation, and "
+                            "cross-frame AST consensus."
+                        ),
                     }
                 )
                 _log(
-                    f"REVIEW visual_recovery {item.calculation_id}: "
-                    f"{visual_result.reason}"
+                    f"RETAIN visual_recovery {item.calculation_id}/"
+                    f"{visual_result.candidate.formula_id}: {visual_result.reason}"
                 )
                 continue
-
-            retained_formulas.append(visual_result.candidate.to_dict())
-            resolutions.append(
-                {
-                    "calculation_id": item.calculation_id,
-                    "state": "formula_retained",
-                    "formula_ids": [visual_result.candidate.formula_id],
-                    "reason": (
-                        "Visual formula passed autonomous source-frame "
-                        "acquisition, shared-parser validation, and "
-                        "cross-frame AST consensus."
-                    ),
-                }
-            )
-            _log(
-                f"RETAIN visual_recovery {item.calculation_id}/"
-                f"{visual_result.candidate.formula_id}: {visual_result.reason}"
-            )
-            continue
 
         item_payload = item.to_dict()
         item_sha = _canonical_sha(item_payload)

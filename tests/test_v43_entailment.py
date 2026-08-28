@@ -327,6 +327,26 @@ class EntailmentTests(unittest.TestCase):
             _has_operation_cue("subtraction", "Please take out the trash.")
         )
 
+    def test_amount_from_base_percentage_is_a_division_cue(self):
+        from research_v43.entailment import _has_operation_cue
+
+        self.assertTrue(
+            _has_operation_cue(
+                "division",
+                "Fifty dollars from the thousand dollar par value is five percent.",
+            )
+        )
+
+    def test_non_numeric_from_phrase_is_not_a_division_cue(self):
+        from research_v43.entailment import _has_operation_cue
+
+        self.assertFalse(
+            _has_operation_cue(
+                "division",
+                "The report from the committee is complete.",
+            )
+        )
+
     def test_non_exact_operation_quote_fails(self):
         segments = [
             {"text": "Divide the total value by the item count."},
