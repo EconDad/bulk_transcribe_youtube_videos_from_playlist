@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Mapping, Sequence
 
 from .calculation_inventory import CalculationItem
@@ -23,6 +24,153 @@ from .inventory_evidence_audit import (
 
 
 _ADJACENT_OPERAND_EXTENSION = 4
+_LOCAL_ASSOCIATION_WINDOW = 4
+_RESULT_CUE_RE = re.compile(
+    r"\b(?:amounts?\s+to|comes?\s+to|goes?\s+up\s+to|"
+    r"rose\s+to|risen\s+to|would\s+have|"
+    r"would\s+be|equals?|gets?|gives?|yields?|makes?|made|"
+    r"difference|total|return|result)\b",
+    re.IGNORECASE,
+)
+_ARITHMETIC_BOUNDARY_RE = re.compile(
+    r"\b(?:add(?:ed|ing)?|plus|subtract(?:ed|ing)?|minus|"
+    r"multipl(?:y|ied|ying)|times|divid(?:e|ed|ing))\b",
+    re.IGNORECASE,
+)
+
+
+def _numeric_only_claim(value: str) -> bool:
+    """Return whether a claim is a numeric literal with optional unit words."""
+
+    from .inventory_evidence_audit import _numeric_signatures
+
+    signatures = _numeric_signatures(value)
+    if len(signatures) != 1:
+        return False
+    remainder = re.sub(
+        r"(?<![a-z0-9.])[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+        r"\s*(?:%|percent\b)?",
+        " ",
+        value.casefold(),
+    )
+    tokens = set(re.findall(r"[a-z]+", remainder))
+    return tokens.issubset(
+        {
+            "dollar",
+            "dollars",
+            "percent",
+            "percentage",
+            "thousand",
+            "million",
+            "billion",
+            "trillion",
+        }
+    )
+
+
+def _numeric_claim_is_reported_result(
+    variable: str,
+    *,
+    segments: Sequence[Mapping[str, object]],
+    start: int,
+    end: int,
+) -> bool:
+    """Recognize a claimed numeric operand presented as an outcome instead."""
+
+    if not _numeric_only_claim(variable):
+        return False
+    for index in range(start, end + 1):
+        text = _range_text(segments, index, index)
+        for cue in _RESULT_CUE_RE.finditer(text):
+            scope = text[cue.start():]
+            if index < end:
+                scope += " " + _range_text(segments, index + 1, index + 1)
+            boundary = _ARITHMETIC_BOUNDARY_RE.search(
+                scope,
+                cue.end() - cue.start(),
+            )
+            if boundary is not None:
+                scope = scope[:boundary.start()]
+            if _gate3_variable_appears(variable, scope):
+                return True
+    return False
+
+
+def _claims_use_reported_result_as_operand(
+    *,
+    variables: Sequence[str],
+    operations: Sequence[str],
+    segments: Sequence[Mapping[str, object]],
+    start: int,
+    end: int,
+) -> bool:
+    """Reject a binary numeric claim that substitutes an outcome for an input."""
+
+    if len(variables) != 2 or len(operations) != 1:
+        return False
+    if operations[0] not in {"addition", "subtraction", "multiplication", "division"}:
+        return False
+    if not all(_numeric_only_claim(variable) for variable in variables):
+        return False
+    return all(
+        _numeric_claim_is_reported_result(
+            variable,
+            segments=segments,
+            start=start,
+            end=end,
+        )
+        for variable in variables
+    )
+
+
+def _operation_has_compact_claim_association(
+    *,
+    variables: Sequence[str],
+    operations: Sequence[str],
+    segments: Sequence[Mapping[str, object]],
+    start: int,
+    end: int,
+) -> bool:
+    """Require an adjacent operation guard to bind the unchanged claims."""
+
+    for window_start in range(start, end + 1):
+        window_end = min(end, window_start + _LOCAL_ASSOCIATION_WINDOW - 1)
+        text = _range_text(segments, window_start, window_end)
+        if not all(
+            _gate3_variable_appears(variable, text)
+            for variable in variables
+        ):
+            continue
+        if all(
+            _gate3_has_operation_cue(operation, text)
+            for operation in operations
+        ):
+            return True
+    return False
+
+
+def _grounded_original_variables(
+    *,
+    item: CalculationItem,
+    segments: Sequence[Mapping[str, object]],
+    start: int,
+    end: int,
+) -> tuple[str, ...]:
+    """Return source-extractive original claims, excluding synthetic aliases."""
+
+    text = _range_text(segments, start, end)
+    normalized_text = re.sub(r"\s+", " ", text.casefold()).strip()
+    grounded: list[str] = []
+    for variable in item.variables_mentioned:
+        if not _gate3_variable_appears(variable, text):
+            continue
+        if re.fullmatch(r"[a-z][a-z0-9_]*", variable) and "_" in variable:
+            spoken = variable.replace("_", " ")
+            if spoken not in normalized_text:
+                continue
+        if variable not in grounded:
+            grounded.append(variable)
+    return tuple(grounded)
 
 
 def _find_minimal_grounded_span(
@@ -195,6 +343,24 @@ def parse_inventory_evidence_audit_response_with_gate3_repair(
 
     reason = str(normalized.get("reason") or "").strip()
     if variables_grounded and operations_grounded:
+        if _claims_use_reported_result_as_operand(
+            variables=variables,
+            operations=operations,
+            segments=segments,
+            start=selected_start,
+            end=selected_end,
+        ):
+            return InventoryAuditDecision(
+                calculation_id=item.calculation_id,
+                action=AuditAction.DOWNGRADE_NON_SYMBOLIC,
+                evidence_segment_ids=evidence_ids,
+                reason=(
+                    "Gate 4 bounded recovery found that a claimed numeric "
+                    "operand is presented by the source as the reported "
+                    "result; the event is retained as non-symbolic rather "
+                    "than treating an outcome as an input."
+                ),
+            )
         return InventoryAuditDecision(
             calculation_id=item.calculation_id,
             action=AuditAction.RECONCILE,
@@ -247,6 +413,24 @@ def parse_inventory_evidence_audit_response_with_gate3_repair(
     if widened is not None:
         widened_start, widened_end = widened
         widened_ids = tuple(sorted({*evidence_ids, widened_start, widened_end}))
+        if _claims_use_reported_result_as_operand(
+            variables=variables,
+            operations=operations,
+            segments=segments,
+            start=widened_start,
+            end=widened_end,
+        ):
+            return InventoryAuditDecision(
+                calculation_id=item.calculation_id,
+                action=AuditAction.DOWNGRADE_NON_SYMBOLIC,
+                evidence_segment_ids=widened_ids,
+                reason=(
+                    "Gate 4 bounded recovery found that a claimed numeric "
+                    "operand is presented by the source as the reported "
+                    "result; the event is retained as non-symbolic rather "
+                    "than treating an outcome as an input."
+                ),
+            )
         suffix = (
             " Gate 3 adjacent operand recovery extended beyond the standard "
             "audit neighborhood only after the selected span independently "
@@ -265,6 +449,42 @@ def parse_inventory_evidence_audit_response_with_gate3_repair(
                 + suffix
             ),
             revised_variables_mentioned=variables,
+            revised_operations_mentioned=operations,
+        )
+
+    # The audit model sometimes replaces source-extractive original values
+    # with unspoken semantic aliases.  Recover only a mechanically grounded
+    # subset of the original claims, and only when at least two distinct
+    # quantities plus every unchanged operation are supported in the selected
+    # hull.  Formula extraction remains responsible for naming the result.
+    original_variables = _grounded_original_variables(
+        item=item,
+        segments=segments,
+        start=selected_start,
+        end=selected_end,
+    )
+    if (
+        len(original_variables) >= 2
+        and operations_grounded
+        and not _claims_use_reported_result_as_operand(
+            variables=original_variables,
+            operations=operations,
+            segments=segments,
+            start=selected_start,
+            end=selected_end,
+        )
+    ):
+        return InventoryAuditDecision(
+            calculation_id=item.calculation_id,
+            action=AuditAction.RECONCILE,
+            evidence_segment_ids=evidence_ids,
+            reason=(
+                ((reason + " ") if reason else "")
+                + "Gate 4 source-extractive recovery retained only original "
+                "inventory quantities and operations that are literally "
+                "grounded in the selected source."
+            ),
+            revised_variables_mentioned=original_variables,
             revised_operations_mentioned=operations,
         )
 
@@ -292,14 +512,14 @@ def parse_inventory_evidence_audit_response_with_gate3_repair(
             extended_start != neighborhood_start
             or extended_end != neighborhood_end
         ):
-            adjacent_text = _range_text(
-                segments,
-                extended_start,
-                extended_end,
-            )
-            adjacent_operation_supported = any(
-                _gate3_has_operation_cue(operation, adjacent_text)
-                for operation in operations
+            adjacent_operation_supported = (
+                _operation_has_compact_claim_association(
+                    variables=variables,
+                    operations=operations,
+                    segments=segments,
+                    start=extended_start,
+                    end=extended_end,
+                )
             )
             if adjacent_operation_supported:
                 assert saved_error is not None

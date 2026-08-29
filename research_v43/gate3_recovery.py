@@ -276,6 +276,14 @@ def _numeric_signature_supported(
     normalized_source = re.sub(r"\s+", " ", source_text.casefold())
     for candidate in candidates:
         escaped = re.escape(candidate).replace(r"\ ", r"\s+")
+        # Transcripts commonly preserve the optional spoken conjunction in
+        # values such as "five hundred and eighteen".  The canonical number
+        # renderer intentionally omits it, so accept either form without
+        # changing the numeric signature being grounded.
+        escaped = escaped.replace(
+            r"hundred\s+",
+            r"hundred(?:\s+and)?\s+",
+        )
         if is_percent:
             pattern = rf"(?<![a-z]){escaped}\s+(?:percent|percentage)(?![a-z])"
         else:
@@ -315,7 +323,15 @@ def _gate3_variable_appears(variable: str, source_text: str) -> bool:
 
 
 def _gate3_has_operation_cue(operation: str, source_text: str) -> bool:
-    if _has_operation_cue(operation, source_text):
+    cue_text = source_text
+    if operation == "multiplication":
+        cue_text = re.sub(
+            r"\b(?:a|the)\s+lot\s+of\s+(?:the\s+)?times\b",
+            " ",
+            cue_text,
+            flags=re.IGNORECASE,
+        )
+    if _has_operation_cue(operation, cue_text):
         return True
     normalized = re.sub(r"\s+", " ", source_text.casefold())
     for cue in _EXTRA_OPERATION_CUES.get(operation, ()):

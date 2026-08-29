@@ -34,6 +34,7 @@ import run_research_v43 as base
 
 from research_v43.gate2_recovery import (
     audit_with_gate2_semantic_downgrades,
+    expand_adjacent_result_name_context,
     find_deterministic_expansion_gate2,
 )
 from research_v43.gate3_audit_recovery import (
@@ -76,7 +77,13 @@ def _run_inventory_evidence_audit_with_gate2_postcheck(
         inventory=audited,
         segments=segments,
     )
-    return postchecked, tuple((*evidence_records, *gate2_records))
+    expanded, result_name_records = expand_adjacent_result_name_context(
+        inventory=postchecked,
+        segments=segments,
+    )
+    return expanded, tuple(
+        (*evidence_records, *gate2_records, *result_name_records)
+    )
 
 
 def main(argv=None) -> int:

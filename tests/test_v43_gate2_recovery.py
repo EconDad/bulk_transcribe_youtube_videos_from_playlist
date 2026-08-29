@@ -13,6 +13,7 @@ from research_v43.calculation_inventory import (
 from research_v43.expression_ast import FormulaCandidate
 from research_v43.gate2_recovery import (
     audit_with_gate2_semantic_downgrades,
+    expand_adjacent_result_name_context,
     find_deterministic_expansion_gate2,
     validate_entailment_response_with_gate2_quote_repair,
 )
@@ -249,6 +250,64 @@ class Gate2RecoveryTests(unittest.TestCase):
         self.assertIsNotNone(decision)
         self.assertEqual(decision.evidence_segment_ids[0], 0)
         self.assertEqual(decision.evidence_segment_ids[-1], 6)
+
+    def test_adjacent_result_name_expands_only_after_claims_ground(self):
+        segments = [
+            {"text": "The rate ratio is lower in this example."},
+            {"text": "Background."},
+            {"text": "Take the current price"},
+            {"text": "and divide it by earnings per unit."},
+        ]
+        item = self._item(
+            name="Rate ratio calculation",
+            start=2,
+            end=3,
+            variables=("current price", "earnings per unit"),
+            operations=("division",),
+        )
+        inventory = CalculationInventory(
+            schema_version="1.0",
+            video_id="video",
+            calculations=(item,),
+        )
+
+        expanded, records = expand_adjacent_result_name_context(
+            inventory=inventory,
+            segments=segments,
+        )
+
+        self.assertEqual(expanded.calculations[0].start_segment, 0)
+        self.assertEqual(expanded.calculations[0].end_segment, 3)
+        self.assertEqual(
+            records[0]["action"],
+            "expand_adjacent_result_name_context",
+        )
+
+    def test_adjacent_result_name_cannot_supply_missing_operation(self):
+        segments = [
+            {"text": "The rate ratio is introduced."},
+            {"text": "The current price and annual earnings are shown."},
+        ]
+        item = self._item(
+            name="Rate ratio calculation",
+            start=1,
+            end=1,
+            variables=("current price", "annual earnings"),
+            operations=("division",),
+        )
+        inventory = CalculationInventory(
+            schema_version="1.0",
+            video_id="video",
+            calculations=(item,),
+        )
+
+        expanded, records = expand_adjacent_result_name_context(
+            inventory=inventory,
+            segments=segments,
+        )
+
+        self.assertEqual(expanded.calculations[0].start_segment, 1)
+        self.assertFalse(records)
 
     def test_quote_repair_uses_only_existing_cited_ranges(self):
         segments = [

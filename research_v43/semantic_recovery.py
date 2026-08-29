@@ -57,6 +57,9 @@ _NUMBER_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:[$€£]\s*)?[+-]?\d[\d,]*(?:\.\d+)?%?"
 )
 _SNAKE_IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_NUMERIC_LEADING_IDENTIFIER_RE = re.compile(
+    r"^\d+(?=[a-z0-9_]*[a-z])[a-z0-9_]+$"
+)
 
 
 def _segment_text(
@@ -250,7 +253,8 @@ def audit_visual_equation_cues_with_semantic_downgrades(
 def _complete_candidate_variable_metadata(
     raw_candidate: Mapping[str, Any],
 ) -> dict[str, Any]:
-    candidate = _canonicalize_candidate_identifier_case(raw_candidate)
+    candidate = _prefix_numeric_leading_identifiers(raw_candidate)
+    candidate = _canonicalize_candidate_identifier_case(candidate)
     ascii_formula = candidate.get("ascii")
     if not isinstance(ascii_formula, str) or not ascii_formula.strip():
         return candidate
@@ -291,6 +295,72 @@ def _complete_candidate_variable_metadata(
         )
         existing.add(symbol)
 
+    candidate["variables"] = variables
+    return candidate
+
+
+def _prefix_numeric_leading_identifiers(
+    raw_candidate: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Make identifier-shaped numeric quantities syntactically valid.
+
+    A token such as ``123_units`` is plainly intended as a named quantity, not
+    the numeric literal ``123``.  Prefixing it with ``value_`` preserves every
+    original token component and changes no operator, constant, relationship,
+    meaning, or unit.  Ambiguous bare numeric literals and malformed symbols
+    are left for the strict parser to reject.
+    """
+
+    candidate = copy.deepcopy(dict(raw_candidate))
+    ascii_formula = candidate.get("ascii")
+    raw_variables = candidate.get("variables")
+    if (
+        not isinstance(ascii_formula, str)
+        or isinstance(raw_variables, (str, bytes))
+        or not isinstance(raw_variables, Sequence)
+    ):
+        return candidate
+
+    variables = [
+        copy.deepcopy(dict(value))
+        for value in raw_variables
+        if isinstance(value, Mapping)
+    ]
+    if len(variables) != len(raw_variables):
+        return candidate
+
+    replacements: dict[str, str] = {}
+    for variable in variables:
+        symbol = variable.get("symbol")
+        if not isinstance(symbol, str):
+            return candidate
+        symbol = symbol.strip().casefold()
+        if not _NUMERIC_LEADING_IDENTIFIER_RE.fullmatch(symbol):
+            continue
+        replacements[symbol] = "value_" + symbol
+
+    if not replacements:
+        return candidate
+
+    final_symbols = [
+        replacements.get(str(variable.get("symbol") or "").strip().casefold(),
+                         str(variable.get("symbol") or "").strip())
+        for variable in variables
+    ]
+    if len(set(final_symbols)) != len(final_symbols):
+        return candidate
+
+    for original, normalized in replacements.items():
+        ascii_formula = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(original)}(?![A-Za-z0-9_])",
+            normalized,
+            ascii_formula,
+            flags=re.IGNORECASE,
+        )
+    for variable, symbol in zip(variables, final_symbols, strict=True):
+        variable["symbol"] = symbol
+
+    candidate["ascii"] = ascii_formula
     candidate["variables"] = variables
     return candidate
 
@@ -359,11 +429,13 @@ def parse_formula_extraction_response_with_variable_completion(
     *,
     item: CalculationItem,
 ) -> FormulaExtractionResult:
-    """Complete missing AST-identifier metadata, then run strict validation.
+    """Apply mechanical identifier-shape repairs, then strict validation.
 
-    The formula expression, formula ID, source claims, derivation, and any model
-    supplied variable definitions are unchanged. Only missing definitions for
-    identifiers already present in the parsed expression are added.
+    Missing definitions for identifiers already present in the expression are
+    added. Identifier letter case is normalized, and an identifier-shaped
+    token beginning with digits receives the fixed ``value_`` prefix. Formula
+    structure, operators, constants, claims, derivation, meanings, and units
+    remain unchanged.
     """
 
     repaired = copy.deepcopy(dict(payload))

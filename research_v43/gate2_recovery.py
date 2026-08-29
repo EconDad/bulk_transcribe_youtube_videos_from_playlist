@@ -21,6 +21,7 @@ from typing import Any, Mapping, Sequence
 from .calculation_inventory import CalculationInventory, CalculationItem
 from .entailment import _OPERATION_CUES, _has_operation_cue
 from .inventory_evidence_audit import (
+    _singularize_token,
     _variable_appears,
     find_deterministic_expansion as _find_deterministic_expansion,
     item_needs_evidence_audit,
@@ -46,6 +47,15 @@ _EXAMPLE_CUE_RE = re.compile(
     re.IGNORECASE,
 )
 _WORD_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
+_GENERIC_RESULT_NAME_WORDS = {
+    "calculation",
+    "formula",
+    "example",
+    "value",
+    "amount",
+    "result",
+}
+_ADJACENT_RESULT_NAME_DISTANCE = 4
 
 
 def _segment_text(
@@ -426,6 +436,125 @@ def audit_with_gate2_semantic_downgrades(
         tuple(records),
     )
 
+
+def expand_adjacent_result_name_context(
+    *,
+    inventory: CalculationInventory,
+    segments: Sequence[Mapping[str, Any]],
+) -> tuple[CalculationInventory, tuple[dict[str, Any], ...]]:
+    """Include a nearby explicit calculation name after claims already ground.
+
+    This expansion cannot provide an operand or operation.  It runs only after
+    the current item span independently grounds all existing inventory claims,
+    and it requires at least two non-generic name tokens in one nearby segment.
+    The extra context exists solely so downstream entailment can ground a
+    normalized left-hand result identifier with exact source text.
+    """
+
+    items: list[CalculationItem] = []
+    records: list[dict[str, Any]] = []
+
+    for item in inventory.calculations:
+        if not item.formula_expected or item.visual_equation_cue:
+            items.append(item)
+            continue
+
+        current_text = _segment_text(
+            segments,
+            item.start_segment,
+            item.end_segment,
+        )
+        canonical_operations = _canonical_operations(item)
+        if len(canonical_operations) != len(item.operations_mentioned):
+            items.append(item)
+            continue
+        if not all(
+            _variable_appears(variable, current_text)
+            for variable in item.variables_mentioned
+        ) or not all(
+            _has_operation_cue(operation, current_text)
+            for operation in canonical_operations
+        ):
+            items.append(item)
+            continue
+
+        name_tokens = {
+            _singularize_token(token.casefold())
+            for token in _WORD_RE.findall(item.name)
+            if len(token) >= 2
+            and token.casefold() not in _GENERIC_RESULT_NAME_WORDS
+        }
+        if len(name_tokens) < 2:
+            items.append(item)
+            continue
+
+        lower = max(0, item.start_segment - _ADJACENT_RESULT_NAME_DISTANCE)
+        upper = min(
+            len(segments) - 1,
+            item.end_segment + _ADJACENT_RESULT_NAME_DISTANCE,
+        )
+        candidates: list[tuple[int, int]] = []
+        for index in range(lower, upper + 1):
+            if item.start_segment <= index <= item.end_segment:
+                continue
+            source_tokens = {
+                _singularize_token(token.casefold())
+                for token in _WORD_RE.findall(
+                    _segment_text(segments, index, index)
+                )
+            }
+            if name_tokens.issubset(source_tokens):
+                distance = min(
+                    abs(index - item.start_segment),
+                    abs(index - item.end_segment),
+                )
+                candidates.append((distance, index))
+
+        if not candidates:
+            items.append(item)
+            continue
+
+        _, index = min(candidates)
+        updated = replace(
+            item,
+            start_segment=min(item.start_segment, index),
+            end_segment=max(item.end_segment, index),
+            reason=(
+                item.reason
+                + " Gate 4 adjacent result-name context included an explicit "
+                "source name for downstream left-hand grounding."
+            ),
+        )
+        items.append(updated)
+        records.append(
+            {
+                "calculation_id": item.calculation_id,
+                "action": "expand_adjacent_result_name_context",
+                "decision_source": "deterministic_gate4",
+                "before": {
+                    "start_segment": item.start_segment,
+                    "end_segment": item.end_segment,
+                },
+                "after": {
+                    "start_segment": updated.start_segment,
+                    "end_segment": updated.end_segment,
+                },
+                "reason": (
+                    "The original span independently grounded all operands and "
+                    "operations; a nearby segment explicitly named the same "
+                    "calculation result."
+                ),
+            }
+        )
+
+    return (
+        CalculationInventory(
+            schema_version=inventory.schema_version,
+            video_id=inventory.video_id,
+            calculations=tuple(items),
+        ),
+        tuple(records),
+    )
 
 def find_deterministic_expansion_gate2(
     *,

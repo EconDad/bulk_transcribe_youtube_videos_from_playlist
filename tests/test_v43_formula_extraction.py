@@ -6,6 +6,7 @@ from research_v43.calculation_inventory import CalculationItem
 from research_v43.formula_extraction import (
     FormulaExtractionError,
     build_formula_extraction_prompt,
+    build_formula_extraction_repair_prompt,
     parse_formula_extraction_response,
 )
 
@@ -126,6 +127,34 @@ class FormulaExtractionTests(unittest.TestCase):
         self.assertIn("Do not inject a textbook formula", prompt)
         self.assertNotIn("coupon", prompt.lower())
         self.assertNotIn("yield to maturity", prompt.lower())
+
+    def test_repair_prompt_forbids_numeric_leading_identifiers(self):
+        prompt = build_formula_extraction_repair_prompt(
+            item=make_item(),
+            segments=[
+                {"text": "Context."},
+                {"text": "The source starts with 204 units."},
+                {"text": "Ten times that gives the result."},
+            ],
+            invalid_payload={
+                "calculation_id": "CALC_0001",
+                "disposition": "candidates_proposed",
+                "reason": "Proposed.",
+                "candidates": [
+                    {
+                        "ascii": "result = 123_units * 10",
+                        "variables": [{"symbol": "123_units"}],
+                    }
+                ],
+            },
+            validation_error=(
+                "variables[0].symbol must be one snake_case identifier"
+            ),
+        )
+
+        self.assertIn("Identifiers must begin with a lowercase letter", prompt)
+        self.assertIn("numeric literal", prompt)
+        self.assertIn("never emit a symbol such as 123_units", prompt)
 
 
 if __name__ == "__main__":

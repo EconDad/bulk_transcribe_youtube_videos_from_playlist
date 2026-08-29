@@ -170,6 +170,9 @@ folder_of_source_documents__original_format
 folder_of_source_documents__converted_to_plaintext
 *.zip
 *.md
+!docs/V4_3_GATE3_PILOT_RESULTS.md
+!docs/V4_3_GATE4_BATCH_RESULTS.md
+!docs/V4_3_REGRESSION_DIAGNOSTIC_REVIEW.md
 generated_transcript_metadata_tables
 generated_transcript_combined_texts
 downloaded_audio
